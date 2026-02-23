@@ -229,6 +229,41 @@ int nvs_erase_key(nvs_handle_t handle, const char *key);
  */
 int nvs_erase_all(nvs_handle_t handle);
 
+/* -----------------------------------------------------------------------
+ * Binary blob
+ * --------------------------------------------------------------------- */
+
+/**
+ * @brief Write a binary blob.
+ *
+ * The blob is serialised across as many consecutive 32-byte entries as
+ * required (Span field), identical to the string encoding but without a
+ * null terminator.
+ *
+ * @param handle  Open read-write handle.
+ * @param key     Key string (max NVS_KEY_MAX_LEN characters).
+ * @param data    Pointer to the data to store.
+ * @param len     Number of bytes to store.
+ * @return NVS_OK on success, negative error code otherwise.
+ */
+int nvs_set_blob(nvs_handle_t handle, const char *key,
+                 const void *data, size_t len);
+
+/**
+ * @brief Read a binary blob.
+ *
+ * If @p buf is NULL, @p len is set to the required buffer size and
+ * NVS_OK is returned — the caller can then allocate and call again.
+ *
+ * @param handle  Open handle (any mode).
+ * @param key     Key string.
+ * @param buf     Destination buffer, or NULL to query required size.
+ * @param len     In/out: buffer size on entry, actual length on exit.
+ * @return NVS_OK on success, negative error code otherwise.
+ */
+int nvs_get_blob(nvs_handle_t handle, const char *key,
+                 void *buf, size_t *len);
+
 #ifdef __cplusplus
 }
 #endif

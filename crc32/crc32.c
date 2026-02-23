@@ -1,44 +1,49 @@
+/**
+ * @file crc32.c
+ * @brief CRC32 implementation using the standard Ethernet reflected polynomial
+ *        (0xEDB88320).
+ *
+ * The lookup table is initialised once on first use.  On bare-metal targets
+ * this is safe because there is no concurrent initialisation.  If the module
+ * is ever used in a multi-threaded environment the caller must ensure
+ * crc32_gen() is first called from a single thread before concurrent use.
+ */
+
 #include "crc32.h"
 
-static uint32_t crc32_table[256];
-static int table_initialized = 0;
+#define CRC32_POLY 0xEDB88320u
 
-static void crc32_init_table(void)
+static uint32_t s_table[256];
+static int      s_table_ready = 0;
+
+static void crc32_build_table(void)
 {
-    uint32_t polynomial = 0xEDB88320;
-    for (uint32_t i = 0; i < 256; i++)
+    for (uint32_t i = 0u; i < 256u; i++)
     {
         uint32_t crc = i;
-        for (uint32_t j = 0; j < 8; j++)
+        for (unsigned j = 0u; j < 8u; j++)
         {
-            if (crc & 1)
-            {
-                crc = (crc >> 1) ^ polynomial;
-            }
-            else
-            {
-                crc >>= 1;
-            }
+            crc = (crc & 1u) ? ((crc >> 1) ^ CRC32_POLY) : (crc >> 1);
         }
-        crc32_table[i] = crc;
+        s_table[i] = crc;
     }
-    table_initialized = 1;
+    s_table_ready = 1;
 }
 
 uint32_t crc32_gen(const void *data, size_t len)
 {
-    if (!table_initialized)
+    if (!s_table_ready)
     {
-        crc32_init_table();
+        crc32_build_table();
     }
 
-    const uint8_t *p = (const uint8_t *)data;
-    uint32_t crc = 0xFFFFFFFF;
+    const uint8_t *p   = (const uint8_t *)data;
+    uint32_t       crc = 0xFFFFFFFFu;
 
     while (len--)
     {
-        crc = (crc >> 8) ^ crc32_table[(crc ^ *p++) & 0xFF];
+        crc = (crc >> 8) ^ s_table[(crc ^ *p++) & 0xFFu];
     }
 
-    return crc ^ 0xFFFFFFFF;
+    return crc ^ 0xFFFFFFFFu;
 }
