@@ -42,10 +42,10 @@ static int adapter_erase(uint32_t addr)
  * Test helpers
  * --------------------------------------------------------------------- */
 
-#define TEST(name)  do { printf("\n[TEST] %s\n", name); fflush(stdout); } while(0)
-#define PASS()      do { printf("  PASS\n"); fflush(stdout); } while(0)
-#define FAIL(msg)   do { printf("  FAIL: %s\n", msg); fflush(stdout); return 1; } while(0)
-#define CHECK(expr) do { int _rc = (expr); if (_rc != 0 && _rc != 1) { printf("  FAIL: %s (rc=%d)\n", #expr, _rc); fflush(stdout); return 1; } else if (!_rc) { FAIL(#expr); } } while(0)
+#define TEST(name)  do { printf("\n[TEST] %s\n", name); } while(0)
+#define PASS()      do { printf("  PASS\n"); } while(0)
+#define FAIL(msg)   do { printf("  FAIL: %s\n", msg); return 1; } while(0)
+#define CHECK(expr) do { int _rc = (expr); if (_rc != 0 && _rc != 1) { printf("  FAIL: %s (rc=%d)\n", #expr, _rc); return 1; } else if (!_rc) { FAIL(#expr); } } while(0)
 
 /* -----------------------------------------------------------------------
  * Tests
@@ -311,7 +311,7 @@ static int test_reinit_persistence(const nvs_config_t *cfg)
     small_cfg.write        = cfg->write;
     small_cfg.erase        = cfg->erase;
 
-    TEST("Persistence â€” data survives re-init (simulated reboot)");
+    TEST("Persistence — data survives re-init (simulated reboot)");
 
     nvs_handle_t h;
     CHECK(nvs_open("persist", NVS_READWRITE, &h) == NVS_OK);
@@ -326,12 +326,18 @@ static int test_reinit_persistence(const nvs_config_t *cfg)
     
     uint32_t magic = 0;
     CHECK(nvs_get_u32(h, "magic", &magic) == NVS_OK);
-    if (magic != 0xDEADBEEFu) { FAIL("magic mismatch"); }
+    if (magic != 0xDEADBEEFu)
+    {
+        FAIL("magic mismatch");
+    }
 
     char name[32];
     size_t len = sizeof(name);
     CHECK(nvs_get_str(h, "name", name, &len) == NVS_OK);
-    if (strcmp(name, "PersistenceRecord") != 0) { FAIL("name mismatch"); }
+    if (strcmp(name, "PersistenceRecord") != 0)
+    {
+        FAIL("name mismatch");
+    }
     
     nvs_close(h);
     PASS();
