@@ -1244,6 +1244,7 @@ int nvs_get_str(nvs_handle_t handle, const char *key, char *buf, size_t *len)
     }
     if (*len < total_size)
     {
+        *len = total_size;
         return NVS_ERR_BUF_TOO_SMALL;
     }
 

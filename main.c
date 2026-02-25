@@ -249,7 +249,7 @@ static int test_gc_trigger(nvs_config_t *cfg)
      */
     nvs_config_t small_cfg = *cfg;
     small_cfg.sector_size = 4096u;
-    small_cfg.num_sectors = 4u;
+    small_cfg.num_sectors = 3u;
     small_cfg.base_address = 0u;
 
     flash_full_erase();
@@ -266,7 +266,7 @@ static int test_gc_trigger(nvs_config_t *cfg)
      * writes a new entry + marks old as Erased, consuming slots).
      * We do this enough times to force GC to run at least once.
      */
-    const int ITERATIONS = 800;
+    const int ITERATIONS = 80000;
     for (int i = 0; i < ITERATIONS; i++)
     {
         int rc = nvs_set_u32(h, "filler", (uint32_t)i);
@@ -344,6 +344,177 @@ static int test_reinit_persistence(const nvs_config_t *cfg)
     return 0;
 }
 
+static int test_erase_all(void)
+{
+    TEST("nvs_erase_all — remove all keys in a namespace");
+
+    nvs_handle_t h1, h2;
+    CHECK(nvs_open("ns_erase", NVS_READWRITE, &h1) == NVS_OK);
+    CHECK(nvs_open("ns_keep",  NVS_READWRITE, &h2) == NVS_OK);
+
+    /* Fill ns_erase */
+    CHECK(nvs_set_u32(h1, "key1", 1) == NVS_OK);
+    CHECK(nvs_set_u32(h1, "key2", 2) == NVS_OK);
+    /* Fill ns_keep */
+    CHECK(nvs_set_u32(h2, "key3", 3) == NVS_OK);
+
+    /* Erase all in ns_erase */
+    CHECK(nvs_erase_all(h1) == NVS_OK);
+
+    /* Verify keys in ns_erase are gone */
+    uint32_t v = 0;
+    CHECK(nvs_get_u32(h1, "key1", &v) == NVS_ERR_NOT_FOUND);
+    CHECK(nvs_get_u32(h1, "key2", &v) == NVS_ERR_NOT_FOUND);
+
+    /* Verify key in ns_keep survives */
+    CHECK(nvs_get_u32(h2, "key3", &v) == NVS_OK);
+    CHECK(v == 3);
+
+    nvs_close(h1);
+    nvs_close(h2);
+    PASS();
+    return 0;
+}
+
+static int test_handle_limits(void)
+{
+    TEST("Handle limits — NVS_MAX_HANDLES enforcement");
+
+    nvs_handle_t handles[NVS_MAX_HANDLES];
+    int rc;
+
+    /* Open max allowed handles */
+    for (int i = 0; i < (int)NVS_MAX_HANDLES; i++)
+    {
+        char ns[16];
+        sprintf(ns, "ns_lim_%d", i);
+        CHECK(nvs_open(ns, NVS_READWRITE, &handles[i]) == NVS_OK);
+    }
+
+    /* Try to open one more — should fail */
+    nvs_handle_t h_fail;
+    rc = nvs_open("one_too_many", NVS_READWRITE, &h_fail);
+    if (rc != NVS_ERR_HANDLE)
+    {
+        FAIL("Allowed opening more than NVS_MAX_HANDLES");
+    }
+
+    /* Close all */
+    for (int i = 0; i < (int)NVS_MAX_HANDLES; i++)
+    {
+        nvs_close(handles[i]);
+    }
+
+    PASS();
+    return 0;
+}
+
+static int test_read_only_mode(void)
+{
+    TEST("Read-only mode — prevent writes on RO handles");
+
+    nvs_handle_t h;
+    /* First ensure namespace exists by opening RW and writing something */
+    CHECK(nvs_open("ro_test", NVS_READWRITE, &h) == NVS_OK);
+    CHECK(nvs_set_u32(h, "data", 100) == NVS_OK);
+    nvs_close(h);
+
+    /* Open in RO mode */
+    CHECK(nvs_open("ro_test", NVS_READONLY, &h) == NVS_OK);
+
+    /* Try to write — should fail */
+    int rc = nvs_set_u32(h, "data", 200);
+    if (rc != NVS_ERR_READ_ONLY)
+    {
+        FAIL("Allowed write on read-only handle");
+    }
+
+    /* Try to erase — should fail */
+    rc = nvs_erase_key(h, "data");
+    /* nvs_erase_key returns NVS_ERR_HANDLE if not READWRITE */
+    if (rc != NVS_ERR_HANDLE)
+    {
+        FAIL("Allowed erase on read-only handle (expected ERR_HANDLE)");
+    }
+
+    nvs_close(h);
+    PASS();
+    return 0;
+}
+
+static int test_error_conditions(void)
+{
+    TEST("Generic error conditions (invalid args, small buffers)");
+
+    nvs_handle_t h;
+    CHECK(nvs_open("err_ns", NVS_READWRITE, &h) == NVS_OK);
+
+    /* 1. NULL pointer error */
+    if (nvs_set_u32(h, NULL, 42) != NVS_ERR_INVALID_ARG)
+    {
+        FAIL("Allowed NULL key in nvs_set_u32");
+    }
+
+    /* 2. Key too long */
+    if (nvs_set_u32(h, "this_key_is_definitely_more_than_15_chars", 123) != NVS_ERR_KEY_TOO_LONG)
+    {
+        FAIL("Allowed key longer than NVS_KEY_MAX_LEN");
+    }
+
+    /* 3. Get non-existent key */
+    uint32_t val;
+    if (nvs_get_u32(h, "no_such_key", &val) != NVS_ERR_NOT_FOUND)
+    {
+        FAIL("nvs_get_u32 returned success for non-existent key");
+    }
+
+    /* 4. String buffer too small */
+    const char *str = "Testing small buffers";
+    size_t str_len = strlen(str) + 1;
+    CHECK(nvs_set_str(h, "msg", str) == NVS_OK);
+
+    char small_buf[5];
+    size_t req_len = sizeof(small_buf);
+    int rc = nvs_get_str(h, "msg", small_buf, &req_len);
+    if (rc != NVS_ERR_BUF_TOO_SMALL)
+    {
+        FAIL("nvs_get_str did not return NVS_ERR_BUF_TOO_SMALL");
+    }
+    if (req_len != str_len)
+    {
+        FAIL("nvs_get_str did not return required length when buf too small");
+    }
+
+    /* 5. Invalid handle */
+    if (nvs_set_u32(0, "key", 1) != NVS_ERR_HANDLE)
+    {
+        FAIL("Allowed operations on handle 0");
+    }
+    if (nvs_set_u32(99, "key", 1) != NVS_ERR_HANDLE)
+    {
+        FAIL("Allowed operations on out-of-range handle");
+    }
+
+    nvs_close(h);
+    PASS();
+    return 0;
+}
+
+static int test_not_init_check(nvs_config_t *cfg)
+{
+    TEST("Invalid config during init");
+
+    nvs_config_t bad_cfg = *cfg;
+    bad_cfg.sector_size = 0;
+    if (nvs_init(&bad_cfg) != NVS_ERR_INVALID_ARG)
+    {
+        FAIL("nvs_init allowed zero sector_size");
+    }
+
+    PASS();
+    return 0;
+}
+
 /* -----------------------------------------------------------------------
  * main
  * --------------------------------------------------------------------- */
@@ -357,7 +528,7 @@ int main(void)
     nvs_config_t cfg =
     {
         .sector_size  = FLASH_SECTOR_SIZE,
-        .num_sectors  = 8u,            /* use first 8 sectors of the simulator */
+        .num_sectors  = 3u,            /* use first 8 sectors of the simulator */
         .base_address = 0u,
         .read         = adapter_read,
         .write        = adapter_write,
@@ -374,6 +545,11 @@ int main(void)
     failures += test_cross_namespace_isolation();
     failures += test_gc_trigger(&cfg);
     failures += test_reinit_persistence(&cfg);
+    failures += test_erase_all();
+    failures += test_handle_limits();
+    failures += test_read_only_mode();
+    failures += test_error_conditions();
+    failures += test_not_init_check(&cfg);
 
     printf("\n========================================\n");
     if (failures == 0)
