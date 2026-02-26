@@ -4,8 +4,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define FLASH_SECTOR_SIZE (64 * 1024)
-#define FLASH_SECTOR_COUNT 64
+#define FLASH_SECTOR_SIZE (4096)
+#define FLASH_SECTOR_COUNT 3
 #define FLASH_SIZE (FLASH_SECTOR_SIZE * FLASH_SECTOR_COUNT)
 
 /**
