@@ -1,14 +1,23 @@
 #include "nvs.h"
-#include "flash_mem.h"
 #include "crc32.h"
 
 #include <string.h>
 
 /*===========================================================================
- *  Module-level state (12 bytes of RAM)
+ *  Module-level state
  *===========================================================================*/
 
 static nvs_context_t g_nvs;
+
+/*===========================================================================
+ *  Convenience macros for driver calls
+ *===========================================================================*/
+
+#define DRV_WRITE(addr, data, len)   g_nvs.driver.write((addr), (data), (len))
+#define DRV_READ(addr, data, len)    g_nvs.driver.read((addr), (data), (len))
+#define DRV_ERASE(addr)              g_nvs.driver.erase_sector((addr))
+#define SECTOR_SIZE                  g_nvs.driver.sector_size
+#define SECTOR_COUNT                 g_nvs.driver.sector_count
 
 /*===========================================================================
  *  Internal helpers — sector addressing
@@ -17,7 +26,7 @@ static nvs_context_t g_nvs;
 /** Return the base flash address for a given sector index (0-based). */
 static inline uint32_t sector_addr(uint8_t idx)
 {
-    return (uint32_t)idx * FLASH_SECTOR_SIZE;
+    return (uint32_t)idx * SECTOR_SIZE;
 }
 
 /** Align a value up to the next multiple of 4. */
@@ -45,9 +54,9 @@ static int read_sector_hdr(uint32_t base,
                            uint32_t *seq,
                            uint32_t *state)
 {
-    flash_read(base + 0, magic,  sizeof(*magic));
-    flash_read(base + 4, seq,    sizeof(*seq));
-    flash_read(base + 8, state,  sizeof(*state));
+    DRV_READ(base + 0, magic,  sizeof(*magic));
+    DRV_READ(base + 4, seq,    sizeof(*seq));
+    DRV_READ(base + 8, state,  sizeof(*state));
     return (*magic == NVS_MAGIC_WORD);
 }
 
@@ -55,15 +64,15 @@ static int read_sector_hdr(uint32_t base,
 static void write_sector_hdr(uint32_t base, uint32_t seq, uint32_t state)
 {
     uint32_t magic = NVS_MAGIC_WORD;
-    flash_write(base + 0, &magic, sizeof(magic));
-    flash_write(base + 4, &seq,   sizeof(seq));
-    flash_write(base + 8, &state, sizeof(state));
+    DRV_WRITE(base + 0, &magic, sizeof(magic));
+    DRV_WRITE(base + 4, &seq,   sizeof(seq));
+    DRV_WRITE(base + 8, &state, sizeof(state));
 }
 
 /** Transition a sector to a new state (bit-flip only, no erase needed). */
 static void set_sector_state(uint32_t base, uint32_t new_state)
 {
-    flash_write(base + 8, &new_state, sizeof(new_state));
+    DRV_WRITE(base + 8, &new_state, sizeof(new_state));
 }
 
 /*===========================================================================
@@ -80,7 +89,7 @@ static uint8_t read_entry_hdr(uint32_t addr,
                               uint32_t *crc)
 {
     uint8_t hdr[NVS_ENTRY_HDR_SIZE];
-    flash_read(addr, hdr, NVS_ENTRY_HDR_SIZE);
+    DRV_READ(addr, hdr, NVS_ENTRY_HDR_SIZE);
 
     *key_len  = hdr[1];
     *data_len = hdr[2];
@@ -121,7 +130,7 @@ static uint32_t compute_entry_crc(uint8_t key_len, uint8_t data_len,
 /** Set an entry's state byte (single flash byte write). */
 static void set_entry_state(uint32_t entry_addr, uint8_t new_state)
 {
-    flash_write(entry_addr, &new_state, 1);
+    DRV_WRITE(entry_addr, &new_state, 1);
 }
 
 /*===========================================================================
@@ -132,16 +141,16 @@ static void set_entry_state(uint32_t entry_addr, uint8_t new_state)
  * Build an ordered list of sector indices sorted by sequence number
  * (descending).  Only sectors with a valid header are included.
  *
- * @param out_indices   Output array (must hold FLASH_SECTOR_COUNT elements).
+ * @param out_indices   Output array (caller must size to sector_count).
  * @param out_count     Number of valid sectors found.
  */
 static void get_sectors_by_seq_desc(uint8_t *out_indices, uint8_t *out_count)
 {
-    uint32_t seqs[FLASH_SECTOR_COUNT];
-    uint8_t  valid[FLASH_SECTOR_COUNT];
+    uint32_t seqs[16];      /* supports up to 16 sectors */
+    uint8_t  valid[16];
     uint8_t  n = 0;
 
-    for (uint8_t i = 0; i < FLASH_SECTOR_COUNT; i++)
+    for (uint8_t i = 0; i < SECTOR_COUNT; i++)
     {
         uint32_t magic, seq, state;
         if (read_sector_hdr(sector_addr(i), &magic, &seq, &state))
@@ -152,7 +161,7 @@ static void get_sectors_by_seq_desc(uint8_t *out_indices, uint8_t *out_count)
         }
     }
 
-    /* Simple insertion sort (max 3 elements — trivial). */
+    /* Simple insertion sort (trivial for small N). */
     for (uint8_t i = 1; i < n; i++)
     {
         uint32_t s = seqs[i];
@@ -182,7 +191,7 @@ static void get_sectors_by_seq_desc(uint8_t *out_indices, uint8_t *out_count)
  */
 static int newer_copy_exists(const char *key, uint8_t key_len, uint32_t src_seq)
 {
-    for (uint8_t i = 0; i < FLASH_SECTOR_COUNT; i++)
+    for (uint8_t i = 0; i < SECTOR_COUNT; i++)
     {
         uint32_t base = sector_addr(i);
         uint32_t magic, seq, state;
@@ -198,7 +207,7 @@ static int newer_copy_exists(const char *key, uint8_t key_len, uint32_t src_seq)
 
         /* Walk entries in this higher-seq sector. */
         uint32_t off = NVS_SECTOR_HDR_SIZE;
-        while (off < FLASH_SECTOR_SIZE)
+        while (off < SECTOR_SIZE)
         {
             uint8_t  kl, dl;
             uint32_t crc;
@@ -212,7 +221,7 @@ static int newer_copy_exists(const char *key, uint8_t key_len, uint32_t src_seq)
             if (st == NVS_ENTRY_VALID && kl == key_len)
             {
                 uint8_t flash_key[NVS_MAX_KEY_LEN];
-                flash_read(base + off + NVS_ENTRY_HDR_SIZE, flash_key, kl);
+                DRV_READ(base + off + NVS_ENTRY_HDR_SIZE, flash_key, kl);
                 if (memcmp(flash_key, key, kl) == 0)
                 {
                     return 1; /* newer copy found */
@@ -238,7 +247,7 @@ static nvs_err_t nvs_gc(void)
     uint32_t lowest_seq  = 0xFFFFFFFF;
     int      target_idx  = -1;
 
-    for (uint8_t i = 0; i < FLASH_SECTOR_COUNT; i++)
+    for (uint8_t i = 0; i < SECTOR_COUNT; i++)
     {
         uint32_t base = sector_addr(i);
         uint32_t magic, seq, state;
@@ -266,7 +275,7 @@ static nvs_err_t nvs_gc(void)
        no newer version elsewhere. */
     uint32_t off = NVS_SECTOR_HDR_SIZE;
     int all_copied = 1;
-    while (off < FLASH_SECTOR_SIZE)
+    while (off < SECTOR_SIZE)
     {
         uint8_t  kl, dl;
         uint32_t crc;
@@ -283,8 +292,8 @@ static nvs_err_t nvs_gc(void)
             uint8_t key_buf[NVS_MAX_KEY_LEN];
             uint8_t data_buf[NVS_MAX_DATA_LEN];
 
-            flash_read(target_base + off + NVS_ENTRY_HDR_SIZE, key_buf, kl);
-            flash_read(target_base + off + NVS_ENTRY_HDR_SIZE + kl, data_buf, dl);
+            DRV_READ(target_base + off + NVS_ENTRY_HDR_SIZE, key_buf, kl);
+            DRV_READ(target_base + off + NVS_ENTRY_HDR_SIZE + kl, data_buf, dl);
 
             /* Only copy if no newer version exists. */
             if (!newer_copy_exists((const char *)key_buf, kl, target_seq))
@@ -294,7 +303,7 @@ static nvs_err_t nvs_gc(void)
                 uint32_t esz = entry_total_size(kl, dl);
 
                 /* Sector-boundary check for the active sector. */
-                if (g_nvs.write_offset + esz > FLASH_SECTOR_SIZE)
+                if (g_nvs.write_offset + esz > SECTOR_SIZE)
                 {
                     /* Cannot fit — this live entry would be lost.
                        Abort GC to prevent data loss. */
@@ -321,8 +330,8 @@ static nvs_err_t nvs_gc(void)
                 memcpy(&entry[NVS_ENTRY_HDR_SIZE + kl], data_buf, dl);
 
                 /* Flash-write the entry. */
-                flash_write(g_nvs.active_sector_addr + g_nvs.write_offset,
-                            entry, (uint16_t)esz);
+                DRV_WRITE(g_nvs.active_sector_addr + g_nvs.write_offset,
+                          entry, (uint16_t)esz);
 
                 /* Commit: flip state to Valid. */
                 set_entry_state(g_nvs.active_sector_addr + g_nvs.write_offset,
@@ -343,7 +352,7 @@ static nvs_err_t nvs_gc(void)
     }
 
     /* Erase the old sector — all live data has been safely moved. */
-    flash_erase_sector(target_base);
+    DRV_ERASE(target_base);
 
     return NVS_OK;
 }
@@ -362,11 +371,11 @@ static nvs_err_t nvs_gc(void)
 static nvs_err_t activate_next_sector(void)
 {
     /* First pass: look for an already-empty sector. */
-    for (uint8_t i = 0; i < FLASH_SECTOR_COUNT; i++)
+    for (uint8_t i = 0; i < SECTOR_COUNT; i++)
     {
         uint32_t base = sector_addr(i);
         uint32_t magic_val;
-        flash_read(base, &magic_val, sizeof(magic_val));
+        DRV_READ(base, &magic_val, sizeof(magic_val));
 
         if (magic_val == 0xFFFFFFFF) /* entire header is erased */
         {
@@ -386,11 +395,11 @@ static nvs_err_t activate_next_sector(void)
     }
 
     /* After GC there should be an empty sector — try again. */
-    for (uint8_t i = 0; i < FLASH_SECTOR_COUNT; i++)
+    for (uint8_t i = 0; i < SECTOR_COUNT; i++)
     {
         uint32_t base = sector_addr(i);
         uint32_t magic_val;
-        flash_read(base, &magic_val, sizeof(magic_val));
+        DRV_READ(base, &magic_val, sizeof(magic_val));
 
         if (magic_val == 0xFFFFFFFF)
         {
@@ -409,13 +418,27 @@ static nvs_err_t activate_next_sector(void)
  *  Public API — nvs_mount
  *===========================================================================*/
 
-nvs_err_t nvs_mount(void)
+nvs_err_t nvs_mount(const nvs_flash_driver_t *driver)
 {
+    if (driver == NULL ||
+        driver->write == NULL ||
+        driver->read  == NULL ||
+        driver->erase_sector == NULL ||
+        driver->sector_size == 0 ||
+        driver->sector_count == 0)
+    {
+        return NVS_ERR_INVALID_ARG;
+    }
+
+    /* Store a copy of the driver so callers don't need to keep it alive. */
+    g_nvs.driver = *driver;
+    g_nvs.seq_counter = 0;
+
     uint32_t best_seq  = 0;
     int      best_idx  = -1;
 
     /* Scan all sector headers. */
-    for (uint8_t i = 0; i < FLASH_SECTOR_COUNT; i++)
+    for (uint8_t i = 0; i < SECTOR_COUNT; i++)
     {
         uint32_t magic, seq, state;
         if (read_sector_hdr(sector_addr(i), &magic, &seq, &state))
@@ -447,7 +470,7 @@ nvs_err_t nvs_mount(void)
 
     /* Walk entries to find write_offset (first free byte). */
     uint32_t off = NVS_SECTOR_HDR_SIZE;
-    while (off < FLASH_SECTOR_SIZE)
+    while (off < SECTOR_SIZE)
     {
         uint8_t  kl, dl;
         uint32_t crc;
@@ -460,7 +483,7 @@ nvs_err_t nvs_mount(void)
         }
 
         uint32_t esz = entry_total_size(kl, dl);
-        if (esz == 0 || off + esz > FLASH_SECTOR_SIZE)
+        if (esz == 0 || off + esz > SECTOR_SIZE)
         {
             break;
         }
@@ -496,7 +519,7 @@ nvs_err_t nvs_write(const char *key, const void *data, uint8_t len)
     uint32_t esz = entry_total_size(key_len, len);
 
     /* ---- Sector boundary / skip logic ---- */
-    if (g_nvs.write_offset + esz > FLASH_SECTOR_SIZE)
+    if (g_nvs.write_offset + esz > SECTOR_SIZE)
     {
         /* Mark current sector as Full. */
         set_sector_state(g_nvs.active_sector_addr, NVS_SECTOR_FULL);
@@ -530,8 +553,8 @@ nvs_err_t nvs_write(const char *key, const void *data, uint8_t len)
     memcpy(&entry[NVS_ENTRY_HDR_SIZE + key_len], data, len);
 
     /* ---- Write the entry (state is still 0xFF = Writing) ---- */
-    flash_write(g_nvs.active_sector_addr + g_nvs.write_offset,
-                entry, (uint16_t)esz);
+    DRV_WRITE(g_nvs.active_sector_addr + g_nvs.write_offset,
+              entry, (uint16_t)esz);
 
     /* ---- Commit: flip state to Valid ---- */
     set_entry_state(g_nvs.active_sector_addr + g_nvs.write_offset,
@@ -541,7 +564,7 @@ nvs_err_t nvs_write(const char *key, const void *data, uint8_t len)
     g_nvs.write_offset += esz;
 
     /* ---- Invalidate older versions of this key ---- */
-    for (uint8_t i = 0; i < FLASH_SECTOR_COUNT; i++)
+    for (uint8_t i = 0; i < SECTOR_COUNT; i++)
     {
         uint32_t base = sector_addr(i);
         uint32_t magic, seq, state;
@@ -552,7 +575,7 @@ nvs_err_t nvs_write(const char *key, const void *data, uint8_t len)
         }
 
         uint32_t off = NVS_SECTOR_HDR_SIZE;
-        while (off < FLASH_SECTOR_SIZE)
+        while (off < SECTOR_SIZE)
         {
             uint8_t  kl, dl;
             uint32_t entry_crc;
@@ -569,7 +592,7 @@ nvs_err_t nvs_write(const char *key, const void *data, uint8_t len)
                 kl == key_len)
             {
                 uint8_t flash_key[NVS_MAX_KEY_LEN];
-                flash_read(base + off + NVS_ENTRY_HDR_SIZE, flash_key, kl);
+                DRV_READ(base + off + NVS_ENTRY_HDR_SIZE, flash_key, kl);
                 if (memcmp(flash_key, key, kl) == 0)
                 {
                     set_entry_state(base + off, NVS_ENTRY_DELETED);
@@ -601,7 +624,7 @@ nvs_err_t nvs_read(const char *key, void *buf, uint8_t buf_size, uint8_t *out_le
     }
 
     /* Get sectors ordered by descending sequence number. */
-    uint8_t indices[FLASH_SECTOR_COUNT];
+    uint8_t indices[16];
     uint8_t count;
     get_sectors_by_seq_desc(indices, &count);
 
@@ -619,7 +642,7 @@ nvs_err_t nvs_read(const char *key, void *buf, uint8_t buf_size, uint8_t *out_le
         uint8_t  match_dl   = 0;
         int      found_here = 0;
 
-        while (off < FLASH_SECTOR_SIZE)
+        while (off < SECTOR_SIZE)
         {
             uint8_t  kl, dl;
             uint32_t entry_crc;
@@ -633,7 +656,7 @@ nvs_err_t nvs_read(const char *key, void *buf, uint8_t buf_size, uint8_t *out_le
             if (st == NVS_ENTRY_VALID && kl == key_len)
             {
                 uint8_t flash_key[NVS_MAX_KEY_LEN];
-                flash_read(base + off + NVS_ENTRY_HDR_SIZE, flash_key, kl);
+                DRV_READ(base + off + NVS_ENTRY_HDR_SIZE, flash_key, kl);
                 if (memcmp(flash_key, key, kl) == 0)
                 {
                     match_off  = off;
@@ -654,8 +677,8 @@ nvs_err_t nvs_read(const char *key, void *buf, uint8_t buf_size, uint8_t *out_le
 
             uint8_t key_buf[NVS_MAX_KEY_LEN];
             uint8_t data_buf[NVS_MAX_DATA_LEN];
-            flash_read(base + match_off + NVS_ENTRY_HDR_SIZE, key_buf, kl2);
-            flash_read(base + match_off + NVS_ENTRY_HDR_SIZE + kl2, data_buf, dl2);
+            DRV_READ(base + match_off + NVS_ENTRY_HDR_SIZE, key_buf, kl2);
+            DRV_READ(base + match_off + NVS_ENTRY_HDR_SIZE + kl2, data_buf, dl2);
 
             uint32_t calc_crc = compute_entry_crc(kl2, dl2, key_buf, data_buf);
             if (calc_crc != stored_crc)
@@ -696,7 +719,7 @@ nvs_err_t nvs_delete(const char *key)
 
     int found = 0;
 
-    for (uint8_t i = 0; i < FLASH_SECTOR_COUNT; i++)
+    for (uint8_t i = 0; i < SECTOR_COUNT; i++)
     {
         uint32_t base = sector_addr(i);
         uint32_t magic, seq, state;
@@ -707,7 +730,7 @@ nvs_err_t nvs_delete(const char *key)
         }
 
         uint32_t off = NVS_SECTOR_HDR_SIZE;
-        while (off < FLASH_SECTOR_SIZE)
+        while (off < SECTOR_SIZE)
         {
             uint8_t  kl, dl;
             uint32_t crc;
@@ -721,7 +744,7 @@ nvs_err_t nvs_delete(const char *key)
             if (st == NVS_ENTRY_VALID && kl == key_len)
             {
                 uint8_t flash_key[NVS_MAX_KEY_LEN];
-                flash_read(base + off + NVS_ENTRY_HDR_SIZE, flash_key, kl);
+                DRV_READ(base + off + NVS_ENTRY_HDR_SIZE, flash_key, kl);
                 if (memcmp(flash_key, key, kl) == 0)
                 {
                     set_entry_state(base + off, NVS_ENTRY_DELETED);

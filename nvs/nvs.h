@@ -47,6 +47,34 @@ typedef enum
 } nvs_err_t;
 
 /*===========================================================================
+ *  Flash driver interface — injected at mount time
+ *===========================================================================*/
+
+/**
+ * The flash driver provides all hardware-specific I/O operations.
+ * The caller fills in the function pointers and flash geometry,
+ * then passes a pointer to nvs_mount().  The NVS module stores
+ * a copy internally and never references a concrete flash HAL.
+ */
+typedef struct
+{
+    /** Write `len` bytes from `data` to flash address `addr`. */
+    void (*write)(uint32_t addr, const void *data, uint16_t len);
+
+    /** Read `len` bytes from flash address `addr` into `data`. */
+    void (*read)(uint32_t addr, void *data, uint16_t len);
+
+    /** Erase the sector that contains `addr`. */
+    void (*erase_sector)(uint32_t addr);
+
+    /** Size of one flash sector in bytes (e.g. 4096). */
+    uint32_t sector_size;
+
+    /** Number of sectors allocated to NVS. */
+    uint8_t  sector_count;
+} nvs_flash_driver_t;
+
+/*===========================================================================
  *  Packed on-flash structures (for documentation; actual I/O uses byte
  *  arrays to avoid compiler alignment pitfalls)
  *===========================================================================*/
@@ -75,14 +103,15 @@ typedef enum
  */
 
 /*===========================================================================
- *  RAM context — 12 bytes total
+ *  RAM context
  *===========================================================================*/
 
 typedef struct
 {
-    uint32_t active_sector_addr;    /**< Base address of the current active sector  */
-    uint32_t write_offset;          /**< Next free byte offset within active sector */
-    uint32_t seq_counter;           /**< Highest sequence number seen               */
+    uint32_t           active_sector_addr;  /**< Base address of active sector  */
+    uint32_t           write_offset;        /**< Next free byte in active sector */
+    uint32_t           seq_counter;         /**< Highest sequence number seen    */
+    nvs_flash_driver_t driver;              /**< Copy of the injected driver     */
 } nvs_context_t;
 
 /*===========================================================================
@@ -92,12 +121,13 @@ typedef struct
 /**
  * @brief Mount / initialize the NVS system.
  *
- * Scans all flash sectors, locates (or creates) the active sector,
- * and reconstructs the minimal RAM context.
+ * Stores a copy of the flash driver, scans all sectors, locates
+ * (or creates) the active sector, and reconstructs the RAM context.
  *
+ * @param driver  Pointer to a populated flash driver struct.
  * @return NVS_OK on success.
  */
-nvs_err_t nvs_mount(void);
+nvs_err_t nvs_mount(const nvs_flash_driver_t *driver);
 
 /**
  * @brief Write a key-value pair.

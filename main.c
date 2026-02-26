@@ -27,6 +27,18 @@ static int g_fail = 0;
         }                                                      \
     } while (0)
 
+/** Build the flash driver struct and call nvs_mount(). */
+static nvs_err_t test_mount_nvs(void)
+{
+    nvs_flash_driver_t drv;
+    drv.write        = flash_write;
+    drv.read         = flash_read;
+    drv.erase_sector = flash_erase_sector;
+    drv.sector_size  = FLASH_SECTOR_SIZE;
+    drv.sector_count = FLASH_SECTOR_COUNT;
+    return nvs_mount(&drv);
+}
+
 /*===========================================================================
  *  Test cases
  *===========================================================================*/
@@ -35,7 +47,7 @@ static void test_mount_on_blank_flash(void)
 {
     printf("\n--- Test: Mount on blank flash ---\n");
     flash_full_erase();
-    nvs_err_t rc = nvs_mount();
+    nvs_err_t rc = test_mount_nvs();
     TEST_ASSERT(rc == NVS_OK, "nvs_mount on erased flash returns NVS_OK");
 }
 
@@ -127,7 +139,7 @@ static void test_sector_skip_logic(void)
 
     /* Start with a fresh flash. */
     flash_full_erase();
-    nvs_mount();
+    test_mount_nvs();
 
     /*
      * Fill the first sector with many writes.
@@ -181,7 +193,7 @@ static void test_garbage_collection(void)
 
     /* Start fresh. */
     flash_full_erase();
-    nvs_mount();
+    test_mount_nvs();
 
     /*
      * We have 3 sectors.  Strategy:
@@ -259,14 +271,14 @@ static void test_remount_persistence(void)
 
     /* Start fresh. */
     flash_full_erase();
-    nvs_mount();
+    test_mount_nvs();
 
     const char *key = "persist";
     uint32_t value = 55555;
     nvs_write(key, &value, sizeof(value));
 
     /* Simulate reboot by re-mounting (flash data stays in RAM sim). */
-    nvs_mount();
+    test_mount_nvs();
 
     uint32_t readback = 0;
     uint8_t  out_len  = 0;
@@ -280,7 +292,7 @@ static void test_invalid_arguments(void)
     printf("\n--- Test: Invalid arguments ---\n");
 
     flash_full_erase();
-    nvs_mount();
+    test_mount_nvs();
 
     uint8_t dummy = 0;
     uint8_t out_len = 0;
@@ -325,7 +337,7 @@ static void test_zero_length_data(void)
     printf("\n--- Test: Zero-length data ---\n");
 
     flash_full_erase();
-    nvs_mount();
+    test_mount_nvs();
 
     /* Writing a key with 0-byte payload (like a flag / boolean marker). */
     uint8_t dummy = 0;
@@ -344,7 +356,7 @@ static void test_max_size_payload(void)
     printf("\n--- Test: Max-size payload (128 bytes) ---\n");
 
     flash_full_erase();
-    nvs_mount();
+    test_mount_nvs();
 
     uint8_t payload[128];
     for (int i = 0; i < 128; i++)
@@ -370,7 +382,7 @@ static void test_max_length_key(void)
     printf("\n--- Test: Max-length key (15 chars) ---\n");
 
     flash_full_erase();
-    nvs_mount();
+    test_mount_nvs();
 
     const char *long_key = "123456789012345"; /* exactly 15 chars */
     uint32_t value = 0xDEADBEEF;
@@ -390,7 +402,7 @@ static void test_multiple_coexisting_keys(void)
     printf("\n--- Test: Multiple coexisting keys ---\n");
 
     flash_full_erase();
-    nvs_mount();
+    test_mount_nvs();
 
     uint32_t v1 = 111, v2 = 222, v3 = 333, v4 = 444, v5 = 555;
     nvs_write("alpha", &v1, sizeof(v1));
@@ -423,7 +435,7 @@ static void test_write_after_delete(void)
     printf("\n--- Test: Write after delete (re-create key) ---\n");
 
     flash_full_erase();
-    nvs_mount();
+    test_mount_nvs();
 
     uint32_t v1 = 100;
     nvs_write("reborn", &v1, sizeof(v1));
@@ -446,7 +458,7 @@ static void test_multiple_overwrites(void)
     printf("\n--- Test: Many sequential overwrites ---\n");
 
     flash_full_erase();
-    nvs_mount();
+    test_mount_nvs();
 
     const char *key = "seq";
     uint32_t value;
@@ -470,7 +482,7 @@ static void test_struct_storage(void)
     printf("\n--- Test: Struct storage ---\n");
 
     flash_full_erase();
-    nvs_mount();
+    test_mount_nvs();
 
     typedef struct
     {
@@ -503,7 +515,7 @@ static void test_delete_nonexistent(void)
     printf("\n--- Test: Delete nonexistent key ---\n");
 
     flash_full_erase();
-    nvs_mount();
+    test_mount_nvs();
 
     nvs_err_t rc = nvs_delete("ghost");
     TEST_ASSERT(rc == NVS_ERR_NOT_FOUND, "Deleting nonexistent key returns NOT_FOUND");
@@ -514,7 +526,7 @@ static void test_remount_after_sector_skip(void)
     printf("\n--- Test: Remount after sector skip ---\n");
 
     flash_full_erase();
-    nvs_mount();
+    test_mount_nvs();
 
     /* Fill sector 0 completely. */
     char key[5];
@@ -535,7 +547,7 @@ static void test_remount_after_sector_skip(void)
     nvs_write("POST", &val, sizeof(val));
 
     /* Simulate reboot. */
-    nvs_mount();
+    test_mount_nvs();
 
     uint32_t readback = 0;
     uint8_t  out_len  = 0;
@@ -555,7 +567,7 @@ static void test_crc_corruption_detection(void)
     printf("\n--- Test: CRC corruption detection ---\n");
 
     flash_full_erase();
-    nvs_mount();
+    test_mount_nvs();
 
     const char *key = "crc1";
     uint32_t value = 0xCAFEBABE;
@@ -581,7 +593,7 @@ static void test_torn_write_recovery(void)
     printf("\n--- Test: Torn write (power-loss) recovery ---\n");
 
     flash_full_erase();
-    nvs_mount();
+    test_mount_nvs();
 
     /* Write a valid entry first. */
     const char *key = "good";
@@ -606,7 +618,7 @@ static void test_torn_write_recovery(void)
     flash_write(28, torn_entry, sizeof(torn_entry));
 
     /* Simulate reboot — remount should skip the torn entry. */
-    nvs_mount();
+    test_mount_nvs();
 
     /* The valid entry should still be readable. */
     uint32_t readback = 0;
@@ -630,7 +642,7 @@ static void test_buffer_too_small(void)
     printf("\n--- Test: Buffer too small on read ---\n");
 
     flash_full_erase();
-    nvs_mount();
+    test_mount_nvs();
 
     uint32_t value = 12345678;
     nvs_write("big4", &value, sizeof(value));  /* writes 4 bytes */
@@ -648,7 +660,7 @@ static void test_gc_no_reclaimable_space(void)
     printf("\n--- Test: GC with no reclaimable space ---\n");
 
     flash_full_erase();
-    nvs_mount();
+    test_mount_nvs();
 
     /*
      * Fill all 3 sectors with unique keys so no entry is superseded.
@@ -702,7 +714,7 @@ static void test_key_prefix_collision(void)
     printf("\n--- Test: Key prefix collision ---\n");
 
     flash_full_erase();
-    nvs_mount();
+    test_mount_nvs();
 
     /* Write two keys where one is a prefix of the other. */
     uint32_t v1 = 100;
@@ -741,7 +753,7 @@ static void test_remount_after_gc(void)
     printf("\n--- Test: Remount after GC ---\n");
 
     flash_full_erase();
-    nvs_mount();
+    test_mount_nvs();
 
     /*
      * Fill sector 0 with the same key so all but one entry are superseded.
@@ -779,7 +791,7 @@ static void test_remount_after_gc(void)
     TEST_ASSERT(rc == NVS_OK, "Write that triggers GC succeeds");
 
     /* Remount. */
-    nvs_mount();
+    test_mount_nvs();
 
     uint32_t readback = 0;
     uint8_t  out_len  = 0;
@@ -798,7 +810,7 @@ static void test_delete_followed_by_gc(void)
     printf("\n--- Test: Delete followed by GC ---\n");
 
     flash_full_erase();
-    nvs_mount();
+    test_mount_nvs();
 
     /*
      * Fill sector 0 with one key ("DEL1"), then delete it.
@@ -854,7 +866,7 @@ static void test_repeated_gc_cycles(void)
     printf("\n--- Test: Repeated GC cycles (stress) ---\n");
 
     flash_full_erase();
-    nvs_mount();
+    test_mount_nvs();
 
     /*
      * Stress test: write a small set of keys many times,
