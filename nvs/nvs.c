@@ -265,6 +265,7 @@ static nvs_err_t nvs_gc(void)
     /* Walk entries in the target sector, copy valid ones that have
        no newer version elsewhere. */
     uint32_t off = NVS_SECTOR_HDR_SIZE;
+    int all_copied = 1;
     while (off < FLASH_SECTOR_SIZE)
     {
         uint8_t  kl, dl;
@@ -295,9 +296,9 @@ static nvs_err_t nvs_gc(void)
                 /* Sector-boundary check for the active sector. */
                 if (g_nvs.write_offset + esz > FLASH_SECTOR_SIZE)
                 {
-                    /* Cannot fit — this GC pass cannot continue.
-                       In a system with only 3 sectors this is unlikely
-                       because GC frees one sector at a time. */
+                    /* Cannot fit — this live entry would be lost.
+                       Abort GC to prevent data loss. */
+                    all_copied = 0;
                     break;
                 }
 
@@ -334,7 +335,14 @@ static nvs_err_t nvs_gc(void)
         off += entry_total_size(kl, dl);
     }
 
-    /* Erase the old sector — it is now fully reclaimed. */
+    if (!all_copied)
+    {
+        /* Could not move all live entries — do NOT erase the source
+           sector, otherwise we would lose data.  Report no space. */
+        return NVS_ERR_NO_SPACE;
+    }
+
+    /* Erase the old sector — all live data has been safely moved. */
     flash_erase_sector(target_base);
 
     return NVS_OK;

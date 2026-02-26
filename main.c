@@ -550,6 +550,361 @@ static void test_remount_after_sector_skip(void)
     TEST_ASSERT(readback == 0, "Old sector entry value correct (0)");
 }
 
+static void test_crc_corruption_detection(void)
+{
+    printf("\n--- Test: CRC corruption detection ---\n");
+
+    flash_full_erase();
+    nvs_mount();
+
+    const char *key = "crc1";
+    uint32_t value = 0xCAFEBABE;
+    nvs_write(key, &value, sizeof(value));
+
+    /*
+     * The entry is at sector 0, offset 12 (right after the 12-byte header).
+     * Entry layout: [state(1) key_len(1) data_len(1) rsv(1) crc(4) key(4) data(4)]
+     * Data bytes start at offset 12 + 8 + 4 = 24.
+     * Corrupt one byte of the data region.
+     */
+    uint8_t corrupt = 0x00;
+    flash_write(24, &corrupt, 1);
+
+    uint32_t readback = 0;
+    uint8_t  out_len  = 0;
+    nvs_err_t rc = nvs_read(key, &readback, sizeof(readback), &out_len);
+    TEST_ASSERT(rc == NVS_ERR_CRC, "Read of corrupted entry returns NVS_ERR_CRC");
+}
+
+static void test_torn_write_recovery(void)
+{
+    printf("\n--- Test: Torn write (power-loss) recovery ---\n");
+
+    flash_full_erase();
+    nvs_mount();
+
+    /* Write a valid entry first. */
+    const char *key = "good";
+    uint32_t v1 = 111;
+    nvs_write(key, &v1, sizeof(v1));
+
+    /*
+     * Simulate a torn write: manually craft an incomplete entry
+     * directly in flash with state = 0xFF (WRITING).
+     * This is what would happen if power was lost mid-write.
+     *
+     * The "good" entry is 16 bytes (8 hdr + 4 key + 4 data).
+     * So the next free offset is 12 + 16 = 28.
+     */
+    uint8_t torn_entry[16];
+    memset(torn_entry, 0xFF, sizeof(torn_entry));
+    torn_entry[0] = 0xFF;  /* state = WRITING (incomplete) */
+    torn_entry[1] = 4;     /* key_len = 4 */
+    torn_entry[2] = 4;     /* data_len = 4 */
+    torn_entry[3] = 0xFF;  /* reserved */
+    /* CRC and data are garbage — simulating partial write. */
+    flash_write(28, torn_entry, sizeof(torn_entry));
+
+    /* Simulate reboot — remount should skip the torn entry. */
+    nvs_mount();
+
+    /* The valid entry should still be readable. */
+    uint32_t readback = 0;
+    uint8_t  out_len  = 0;
+    nvs_err_t rc = nvs_read(key, &readback, sizeof(readback), &out_len);
+    TEST_ASSERT(rc == NVS_OK, "Valid entry survives torn write + remount");
+    TEST_ASSERT(readback == 111, "Valid entry value is correct (111)");
+
+    /* The torn key should not be found (state was never committed to 0xFE). */
+    rc = nvs_read("torn", &readback, sizeof(readback), &out_len);
+    TEST_ASSERT(rc == NVS_ERR_NOT_FOUND, "Torn entry is not readable");
+
+    /* We should be able to write new data after the torn entry position. */
+    uint32_t v2 = 222;
+    rc = nvs_write("new1", &v2, sizeof(v2));
+    TEST_ASSERT(rc == NVS_OK, "Can write new data after torn entry recovery");
+}
+
+static void test_buffer_too_small(void)
+{
+    printf("\n--- Test: Buffer too small on read ---\n");
+
+    flash_full_erase();
+    nvs_mount();
+
+    uint32_t value = 12345678;
+    nvs_write("big4", &value, sizeof(value));  /* writes 4 bytes */
+
+    /* Try to read into a 2-byte buffer — should fail. */
+    uint8_t small_buf[2];
+    uint8_t out_len = 0;
+    nvs_err_t rc = nvs_read("big4", small_buf, sizeof(small_buf), &out_len);
+    TEST_ASSERT(rc == NVS_ERR_INVALID_ARG,
+                "Read with undersized buffer returns INVALID_ARG");
+}
+
+static void test_gc_no_reclaimable_space(void)
+{
+    printf("\n--- Test: GC with no reclaimable space ---\n");
+
+    flash_full_erase();
+    nvs_mount();
+
+    /*
+     * Fill all 3 sectors with unique keys so no entry is superseded.
+     * Each entry: 8 B header + 4 B key + 4 B data = 16 B.
+     * Per sector: (4096 - 12) / 16 = 255 entries.
+     * Total unique keys: 255 * 3 = 765.
+     *
+     * After filling sectors 0 and 1, sector 2 becomes Active.
+     * Fill sector 2 too. The *next* write should fail with NO_SPACE
+     * because GC can't reclaim any sector (all entries are live & unique).
+     */
+    char key[5];
+    uint32_t val;
+    int fills_ok = 1;
+
+    for (int i = 0; i < 765; i++)
+    {
+        /* Generate unique 4-char keys: "A000" .. "A764" */
+        key[0] = (char)('A' + (i / 255));
+        key[1] = '0' + (char)((i % 255) / 100);
+        key[2] = '0' + (char)(((i % 255) / 10) % 10);
+        key[3] = '0' + (char)((i % 255) % 10);
+        key[4] = '\0';
+        val = (uint32_t)i;
+
+        nvs_err_t rc = nvs_write(key, &val, sizeof(val));
+        if (rc != NVS_OK)
+        {
+            fills_ok = 0;
+            break;
+        }
+    }
+    TEST_ASSERT(fills_ok, "765 unique entries written across 3 sectors");
+
+    /* One more write should fail — flash is truly full. */
+    val = 9999;
+    nvs_err_t rc = nvs_write("FULL", &val, sizeof(val));
+    TEST_ASSERT(rc == NVS_ERR_NO_SPACE,
+                "Write when flash is truly full returns NVS_ERR_NO_SPACE");
+
+    /* Verify existing data is still intact. */
+    uint32_t readback = 0;
+    uint8_t  out_len  = 0;
+    rc = nvs_read("A000", &readback, sizeof(readback), &out_len);
+    TEST_ASSERT(rc == NVS_OK, "Existing data survives failed write");
+    TEST_ASSERT(readback == 0, "Existing data value is correct (0)");
+}
+
+static void test_key_prefix_collision(void)
+{
+    printf("\n--- Test: Key prefix collision ---\n");
+
+    flash_full_erase();
+    nvs_mount();
+
+    /* Write two keys where one is a prefix of the other. */
+    uint32_t v1 = 100;
+    uint32_t v2 = 200;
+    nvs_write("foo", &v1, sizeof(v1));
+    nvs_write("foobar", &v2, sizeof(v2));
+
+    uint32_t rb = 0;
+    uint8_t  ol = 0;
+
+    nvs_err_t rc = nvs_read("foo", &rb, sizeof(rb), &ol);
+    TEST_ASSERT(rc == NVS_OK, "Read 'foo' returns NVS_OK");
+    TEST_ASSERT(rb == 100, "'foo' reads 100, not confused with 'foobar'");
+
+    rb = 0;
+    rc = nvs_read("foobar", &rb, sizeof(rb), &ol);
+    TEST_ASSERT(rc == NVS_OK, "Read 'foobar' returns NVS_OK");
+    TEST_ASSERT(rb == 200, "'foobar' reads 200, not confused with 'foo'");
+
+    /* Overwrite the shorter key — the longer one must not be affected. */
+    v1 = 999;
+    nvs_write("foo", &v1, sizeof(v1));
+
+    rb = 0;
+    rc = nvs_read("foobar", &rb, sizeof(rb), &ol);
+    TEST_ASSERT(rc == NVS_OK, "'foobar' still readable after overwriting 'foo'");
+    TEST_ASSERT(rb == 200, "'foobar' still 200 after overwriting 'foo'");
+
+    rb = 0;
+    rc = nvs_read("foo", &rb, sizeof(rb), &ol);
+    TEST_ASSERT(rb == 999, "'foo' updated to 999");
+}
+
+static void test_remount_after_gc(void)
+{
+    printf("\n--- Test: Remount after GC ---\n");
+
+    flash_full_erase();
+    nvs_mount();
+
+    /*
+     * Fill sector 0 with the same key so all but one entry are superseded.
+     * Then fill sector 1 similarly. At that point sector 0 is Full with
+     * mostly deleted entries, and sector 1 is Full.  Writing into sector 2
+     * forces GC on sector 0.  Then we remount.
+     */
+    uint32_t val;
+    for (int i = 0; i < 255; i++)
+    {
+        val = (uint32_t)i;
+        nvs_write("AAAA", &val, sizeof(val));
+    }
+
+    for (int i = 0; i < 255; i++)
+    {
+        val = (uint32_t)(i + 1000);
+        nvs_write("BBBB", &val, sizeof(val));
+    }
+
+    /* Now in sector 2. Write a sentinel value. */
+    val = 3333;
+    nvs_write("CCCC", &val, sizeof(val));
+
+    /* Fill sector 2 to trigger GC on sector 0. */
+    for (int i = 0; i < 252; i++)
+    {
+        val = (uint32_t)(i + 5000);
+        nvs_write("DDDD", &val, sizeof(val));
+    }
+
+    /* This should trigger sector skip + GC. */
+    val = 6666;
+    nvs_err_t rc = nvs_write("POST", &val, sizeof(val));
+    TEST_ASSERT(rc == NVS_OK, "Write that triggers GC succeeds");
+
+    /* Remount. */
+    nvs_mount();
+
+    uint32_t readback = 0;
+    uint8_t  out_len  = 0;
+
+    rc = nvs_read("POST", &readback, sizeof(readback), &out_len);
+    TEST_ASSERT(rc == NVS_OK, "POST readable after GC + remount");
+    TEST_ASSERT(readback == 6666, "POST value correct (6666)");
+
+    rc = nvs_read("BBBB", &readback, sizeof(readback), &out_len);
+    TEST_ASSERT(rc == NVS_OK, "BBBB readable after GC + remount");
+    TEST_ASSERT(readback == 1254, "BBBB value correct (1254)");
+}
+
+static void test_delete_followed_by_gc(void)
+{
+    printf("\n--- Test: Delete followed by GC ---\n");
+
+    flash_full_erase();
+    nvs_mount();
+
+    /*
+     * Fill sector 0 with one key ("DEL1"), then delete it.
+     * All entries in sector 0 are now Deleted.
+     * Fill sector 1. Fill sector 2 to trigger GC on sector 0.
+     * After GC, "DEL1" must NOT be resurrected — it should
+     * remain NOT_FOUND.
+     */
+    uint32_t val;
+    for (int i = 0; i < 255; i++)
+    {
+        val = (uint32_t)i;
+        nvs_write("DEL1", &val, sizeof(val));
+    }
+
+    /* Delete it. All 255 entries in sector 0 become Deleted. */
+    nvs_delete("DEL1");
+
+    /* Fill sector 1 with a different key. */
+    for (int i = 0; i < 255; i++)
+    {
+        val = (uint32_t)(i + 2000);
+        nvs_write("KEEP", &val, sizeof(val));
+    }
+
+    /* Fill sector 2 to trigger GC on sector 0. */
+    for (int i = 0; i < 253; i++)
+    {
+        val = (uint32_t)(i + 4000);
+        nvs_write("FILL", &val, sizeof(val));
+    }
+
+    /* Trigger GC. */
+    val = 8888;
+    nvs_err_t rc = nvs_write("TRIG", &val, sizeof(val));
+    TEST_ASSERT(rc == NVS_OK, "Write triggering GC after delete succeeds");
+
+    /* DEL1 must still be gone — GC must NOT resurrect deleted entries. */
+    uint32_t readback = 0;
+    uint8_t  out_len  = 0;
+    rc = nvs_read("DEL1", &readback, sizeof(readback), &out_len);
+    TEST_ASSERT(rc == NVS_ERR_NOT_FOUND,
+                "Deleted key remains NOT_FOUND after GC");
+
+    /* KEEP should survive. */
+    rc = nvs_read("KEEP", &readback, sizeof(readback), &out_len);
+    TEST_ASSERT(rc == NVS_OK, "Non-deleted key survives GC");
+    TEST_ASSERT(readback == 2254, "Non-deleted key value correct (2254)");
+}
+
+static void test_repeated_gc_cycles(void)
+{
+    printf("\n--- Test: Repeated GC cycles (stress) ---\n");
+
+    flash_full_erase();
+    nvs_mount();
+
+    /*
+     * Stress test: write a small set of keys many times,
+     * cycling through multiple GC rounds.  Each key is
+     * overwritten ~800 times across ~3200 total writes.
+     * With 3 sectors × 255 entries each, this forces
+     * several GC cycles.
+     */
+    const char *keys[] = {"K1", "K2", "K3", "K4"};
+    const int num_keys = 4;
+    const int total_writes = 3200;
+    int writes_ok = 1;
+    uint32_t val;
+
+    for (int i = 0; i < total_writes; i++)
+    {
+        val = (uint32_t)i;
+        nvs_err_t rc = nvs_write(keys[i % num_keys], &val, sizeof(val));
+        if (rc != NVS_OK)
+        {
+            printf("  [INFO] Write failed at iteration %d (rc=%d)\n", i, rc);
+            writes_ok = 0;
+            break;
+        }
+    }
+    TEST_ASSERT(writes_ok, "3200 writes across multiple GC cycles succeed");
+
+    /* Verify each key holds its most recent value. */
+    uint32_t readback = 0;
+    uint8_t  out_len  = 0;
+    int reads_ok = 1;
+
+    for (int k = 0; k < num_keys; k++)
+    {
+        /* The most recent write to keys[k] was at iteration
+           (total_writes - 1) rounded down to the last i where i%num_keys==k.
+           Last write for K1(0): i=3196, K2(1): i=3197, K3(2): i=3198, K4(3): i=3199 */
+        int last_i = total_writes - num_keys + k;
+
+        nvs_err_t rc = nvs_read(keys[k], &readback, sizeof(readback), &out_len);
+        if (rc != NVS_OK || readback != (uint32_t)last_i)
+        {
+            printf("  [INFO] Key '%s' expected %d got %u (rc=%d)\n",
+                   keys[k], last_i, readback, rc);
+            reads_ok = 0;
+        }
+    }
+    TEST_ASSERT(reads_ok, "All keys hold correct final values after stress test");
+}
+
 /*===========================================================================
  *  Main
  *===========================================================================*/
@@ -579,6 +934,14 @@ int main(void)
     test_struct_storage();
     test_delete_nonexistent();
     test_remount_after_sector_skip();
+    test_crc_corruption_detection();
+    test_torn_write_recovery();
+    test_buffer_too_small();
+    test_gc_no_reclaimable_space();
+    test_key_prefix_collision();
+    test_remount_after_gc();
+    test_delete_followed_by_gc();
+    test_repeated_gc_cycles();
 
     printf("\n========================================\n");
     printf("  Results: %d passed, %d failed\n", g_pass, g_fail);
