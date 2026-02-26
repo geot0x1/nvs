@@ -275,6 +275,281 @@ static void test_remount_persistence(void)
     TEST_ASSERT(readback == 55555, "Data survives remount (55555)");
 }
 
+static void test_invalid_arguments(void)
+{
+    printf("\n--- Test: Invalid arguments ---\n");
+
+    flash_full_erase();
+    nvs_mount();
+
+    uint8_t dummy = 0;
+    uint8_t out_len = 0;
+
+    /* NULL key */
+    TEST_ASSERT(nvs_write(NULL, &dummy, 1) == NVS_ERR_INVALID_ARG,
+                "Write with NULL key returns INVALID_ARG");
+
+    /* NULL data */
+    TEST_ASSERT(nvs_write("k", NULL, 1) == NVS_ERR_INVALID_ARG,
+                "Write with NULL data returns INVALID_ARG");
+
+    /* Empty key */
+    TEST_ASSERT(nvs_write("", &dummy, 1) == NVS_ERR_INVALID_ARG,
+                "Write with empty key returns INVALID_ARG");
+
+    /* Key too long (16 chars) */
+    TEST_ASSERT(nvs_write("1234567890123456", &dummy, 1) == NVS_ERR_INVALID_ARG,
+                "Write with 16-char key returns INVALID_ARG");
+
+    /* Data too large (129 bytes) */
+    uint8_t big[129];
+    memset(big, 0xAB, sizeof(big));
+    TEST_ASSERT(nvs_write("k", big, 129) == NVS_ERR_INVALID_ARG,
+                "Write with 129-byte data returns INVALID_ARG");
+
+    /* NULL args for read */
+    TEST_ASSERT(nvs_read(NULL, &dummy, 1, &out_len) == NVS_ERR_INVALID_ARG,
+                "Read with NULL key returns INVALID_ARG");
+    TEST_ASSERT(nvs_read("k", NULL, 1, &out_len) == NVS_ERR_INVALID_ARG,
+                "Read with NULL buf returns INVALID_ARG");
+    TEST_ASSERT(nvs_read("k", &dummy, 1, NULL) == NVS_ERR_INVALID_ARG,
+                "Read with NULL out_len returns INVALID_ARG");
+
+    /* NULL key for delete */
+    TEST_ASSERT(nvs_delete(NULL) == NVS_ERR_INVALID_ARG,
+                "Delete with NULL key returns INVALID_ARG");
+}
+
+static void test_zero_length_data(void)
+{
+    printf("\n--- Test: Zero-length data ---\n");
+
+    flash_full_erase();
+    nvs_mount();
+
+    /* Writing a key with 0-byte payload (like a flag / boolean marker). */
+    uint8_t dummy = 0;
+    nvs_err_t rc = nvs_write("flag", &dummy, 0);
+    TEST_ASSERT(rc == NVS_OK, "Write zero-length data returns NVS_OK");
+
+    uint8_t buf[4] = {0xFF, 0xFF, 0xFF, 0xFF};
+    uint8_t out_len = 99;
+    rc = nvs_read("flag", buf, sizeof(buf), &out_len);
+    TEST_ASSERT(rc == NVS_OK, "Read zero-length data returns NVS_OK");
+    TEST_ASSERT(out_len == 0, "Read reports out_len == 0");
+}
+
+static void test_max_size_payload(void)
+{
+    printf("\n--- Test: Max-size payload (128 bytes) ---\n");
+
+    flash_full_erase();
+    nvs_mount();
+
+    uint8_t payload[128];
+    for (int i = 0; i < 128; i++)
+    {
+        payload[i] = (uint8_t)(i & 0xFF);
+    }
+
+    nvs_err_t rc = nvs_write("big", payload, 128);
+    TEST_ASSERT(rc == NVS_OK, "Write 128-byte payload returns NVS_OK");
+
+    uint8_t readback[128];
+    memset(readback, 0, sizeof(readback));
+    uint8_t out_len = 0;
+    rc = nvs_read("big", readback, sizeof(readback), &out_len);
+    TEST_ASSERT(rc == NVS_OK, "Read 128-byte payload returns NVS_OK");
+    TEST_ASSERT(out_len == 128, "Read reports out_len == 128");
+    TEST_ASSERT(memcmp(payload, readback, 128) == 0,
+                "128-byte payload data matches exactly");
+}
+
+static void test_max_length_key(void)
+{
+    printf("\n--- Test: Max-length key (15 chars) ---\n");
+
+    flash_full_erase();
+    nvs_mount();
+
+    const char *long_key = "123456789012345"; /* exactly 15 chars */
+    uint32_t value = 0xDEADBEEF;
+
+    nvs_err_t rc = nvs_write(long_key, &value, sizeof(value));
+    TEST_ASSERT(rc == NVS_OK, "Write with 15-char key returns NVS_OK");
+
+    uint32_t readback = 0;
+    uint8_t  out_len  = 0;
+    rc = nvs_read(long_key, &readback, sizeof(readback), &out_len);
+    TEST_ASSERT(rc == NVS_OK, "Read with 15-char key returns NVS_OK");
+    TEST_ASSERT(readback == 0xDEADBEEF, "Value matches (0xDEADBEEF)");
+}
+
+static void test_multiple_coexisting_keys(void)
+{
+    printf("\n--- Test: Multiple coexisting keys ---\n");
+
+    flash_full_erase();
+    nvs_mount();
+
+    uint32_t v1 = 111, v2 = 222, v3 = 333, v4 = 444, v5 = 555;
+    nvs_write("alpha", &v1, sizeof(v1));
+    nvs_write("bravo", &v2, sizeof(v2));
+    nvs_write("charlie", &v3, sizeof(v3));
+    nvs_write("delta", &v4, sizeof(v4));
+    nvs_write("echo", &v5, sizeof(v5));
+
+    uint32_t rb = 0;
+    uint8_t  ol = 0;
+
+    nvs_read("alpha", &rb, sizeof(rb), &ol);
+    TEST_ASSERT(rb == 111, "Key 'alpha' reads 111");
+
+    nvs_read("bravo", &rb, sizeof(rb), &ol);
+    TEST_ASSERT(rb == 222, "Key 'bravo' reads 222");
+
+    nvs_read("charlie", &rb, sizeof(rb), &ol);
+    TEST_ASSERT(rb == 333, "Key 'charlie' reads 333");
+
+    nvs_read("delta", &rb, sizeof(rb), &ol);
+    TEST_ASSERT(rb == 444, "Key 'delta' reads 444");
+
+    nvs_read("echo", &rb, sizeof(rb), &ol);
+    TEST_ASSERT(rb == 555, "Key 'echo' reads 555");
+}
+
+static void test_write_after_delete(void)
+{
+    printf("\n--- Test: Write after delete (re-create key) ---\n");
+
+    flash_full_erase();
+    nvs_mount();
+
+    uint32_t v1 = 100;
+    nvs_write("reborn", &v1, sizeof(v1));
+    nvs_delete("reborn");
+
+    /* Re-create with a new value. */
+    uint32_t v2 = 999;
+    nvs_err_t rc = nvs_write("reborn", &v2, sizeof(v2));
+    TEST_ASSERT(rc == NVS_OK, "Write after delete returns NVS_OK");
+
+    uint32_t readback = 0;
+    uint8_t  out_len  = 0;
+    rc = nvs_read("reborn", &readback, sizeof(readback), &out_len);
+    TEST_ASSERT(rc == NVS_OK, "Read re-created key returns NVS_OK");
+    TEST_ASSERT(readback == 999, "Re-created key has new value (999)");
+}
+
+static void test_multiple_overwrites(void)
+{
+    printf("\n--- Test: Many sequential overwrites ---\n");
+
+    flash_full_erase();
+    nvs_mount();
+
+    const char *key = "seq";
+    uint32_t value;
+
+    /* Write the same key 50 times with increasing values. */
+    for (int i = 0; i < 50; i++)
+    {
+        value = (uint32_t)(i * 10);
+        nvs_write(key, &value, sizeof(value));
+    }
+
+    uint32_t readback = 0;
+    uint8_t  out_len  = 0;
+    nvs_err_t rc = nvs_read(key, &readback, sizeof(readback), &out_len);
+    TEST_ASSERT(rc == NVS_OK, "Read after 50 overwrites returns NVS_OK");
+    TEST_ASSERT(readback == 490, "Final overwrite value is correct (490)");
+}
+
+static void test_struct_storage(void)
+{
+    printf("\n--- Test: Struct storage ---\n");
+
+    flash_full_erase();
+    nvs_mount();
+
+    typedef struct
+    {
+        uint16_t id;
+        int32_t  temperature;
+        uint8_t  flags;
+    } sensor_data_t;
+
+    sensor_data_t original;
+    original.id          = 42;
+    original.temperature = -1500;
+    original.flags       = 0xAB;
+
+    nvs_err_t rc = nvs_write("sens", &original, sizeof(original));
+    TEST_ASSERT(rc == NVS_OK, "Write struct returns NVS_OK");
+
+    sensor_data_t readback;
+    memset(&readback, 0, sizeof(readback));
+    uint8_t out_len = 0;
+    rc = nvs_read("sens", &readback, sizeof(readback), &out_len);
+    TEST_ASSERT(rc == NVS_OK, "Read struct returns NVS_OK");
+    TEST_ASSERT(out_len == sizeof(sensor_data_t), "Struct size matches");
+    TEST_ASSERT(readback.id == 42, "Struct field 'id' matches (42)");
+    TEST_ASSERT(readback.temperature == -1500, "Struct field 'temperature' matches (-1500)");
+    TEST_ASSERT(readback.flags == 0xAB, "Struct field 'flags' matches (0xAB)");
+}
+
+static void test_delete_nonexistent(void)
+{
+    printf("\n--- Test: Delete nonexistent key ---\n");
+
+    flash_full_erase();
+    nvs_mount();
+
+    nvs_err_t rc = nvs_delete("ghost");
+    TEST_ASSERT(rc == NVS_ERR_NOT_FOUND, "Deleting nonexistent key returns NOT_FOUND");
+}
+
+static void test_remount_after_sector_skip(void)
+{
+    printf("\n--- Test: Remount after sector skip ---\n");
+
+    flash_full_erase();
+    nvs_mount();
+
+    /* Fill sector 0 completely. */
+    char key[5];
+    uint32_t val;
+    for (int i = 0; i < 255; i++)
+    {
+        key[0] = 'K';
+        key[1] = '0' + (char)(i / 100);
+        key[2] = '0' + (char)((i / 10) % 10);
+        key[3] = '0' + (char)(i % 10);
+        key[4] = '\0';
+        val = (uint32_t)i;
+        nvs_write(key, &val, sizeof(val));
+    }
+
+    /* This goes to sector 1. */
+    val = 12345;
+    nvs_write("POST", &val, sizeof(val));
+
+    /* Simulate reboot. */
+    nvs_mount();
+
+    uint32_t readback = 0;
+    uint8_t  out_len  = 0;
+    nvs_err_t rc = nvs_read("POST", &readback, sizeof(readback), &out_len);
+    TEST_ASSERT(rc == NVS_OK, "Read after remount+sector skip returns NVS_OK");
+    TEST_ASSERT(readback == 12345, "Value survives remount across sectors (12345)");
+
+    /* Also verify an entry from sector 0 is still readable. */
+    readback = 0;
+    rc = nvs_read("K000", &readback, sizeof(readback), &out_len);
+    TEST_ASSERT(rc == NVS_OK, "Old sector entry readable after remount");
+    TEST_ASSERT(readback == 0, "Old sector entry value correct (0)");
+}
+
 /*===========================================================================
  *  Main
  *===========================================================================*/
@@ -294,6 +569,16 @@ int main(void)
     test_sector_skip_logic();
     test_garbage_collection();
     test_remount_persistence();
+    test_invalid_arguments();
+    test_zero_length_data();
+    test_max_size_payload();
+    test_max_length_key();
+    test_multiple_coexisting_keys();
+    test_write_after_delete();
+    test_multiple_overwrites();
+    test_struct_storage();
+    test_delete_nonexistent();
+    test_remount_after_sector_skip();
 
     printf("\n========================================\n");
     printf("  Results: %d passed, %d failed\n", g_pass, g_fail);
