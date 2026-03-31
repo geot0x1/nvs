@@ -10,7 +10,12 @@ void flash_write(uint32_t addr, const void* data, uint16_t len)
     {
         return; // Simple bounds check
     }
-    memcpy(&fcb_flash[addr], data, len);
+
+    const uint8_t* src = (const uint8_t*)data;
+    for (uint16_t i = 0; i < len; i++)
+    {
+        fcb_flash[addr + i] &= src[i];
+    }
 }
 
 void flash_read(uint32_t addr, void* data, uint16_t size)
