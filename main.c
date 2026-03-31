@@ -5,6 +5,9 @@
 #include <string.h>
 #include <stdint.h>
 
+#define TEST_ENTRY_SIZE (16U)
+#define ENTRIES_PER_SECTOR ((FLASH_SECTOR_SIZE - NVS_SECTOR_HDR_SIZE) / TEST_ENTRY_SIZE)
+
 /*===========================================================================
  *  Test helpers
  *===========================================================================*/
@@ -144,17 +147,17 @@ static void test_sector_skip_logic(void)
     /*
      * Fill the first sector with many writes.
      * Each entry: 8 B header + 4 B key + 4 B data = 16 B (already aligned).
-     * Sector usable space: 4096 - 12 (header) = 4084 bytes.
-     * Number of 16-B entries that fit: 4084 / 16 = 255 (with 4 bytes left).
+     * Sector usable space: FLASH_SECTOR_SIZE - 12 (header).
+     * Number of 16-B entries that fit: (FLASH_SECTOR_SIZE - 12) / 16.
      *
-     * After 255 writes, there are only 4 bytes left — not enough for
+     * After ENTRIES_PER_SECTOR writes, there are only a few bytes left — not enough for
      * any new entry (min 12 B). The next write must skip to sector 1.
      */
     char key[5];
     uint32_t val;
 
     int writes_ok = 1;
-    for (int i = 0; i < 255; i++)
+    for (int i = 0; i < (int)ENTRIES_PER_SECTOR; i++)
     {
         /* Generate unique 4-char keys: "K000" .. "K254" */
         key[0] = 'K';
@@ -171,7 +174,7 @@ static void test_sector_skip_logic(void)
             break;
         }
     }
-    TEST_ASSERT(writes_ok, "255 entries written to fill first sector");
+    TEST_ASSERT(writes_ok, "Sufficient entries written to fill first sector");
 
     /* This write should trigger the skip to sector 1. */
     const char *overflow_key = "OVER";
@@ -209,16 +212,16 @@ static void test_garbage_collection(void)
      * Use a single repeating key per sector so deletions are simple.
      */
 
-    /* Fill sector 0 (255 entries of key "A"). */
+    /* Fill sector 0 (ENTRIES_PER_SECTOR entries of key "A"). */
     uint32_t val;
-    for (int i = 0; i < 255; i++)
+    for (int i = 0; i < (int)ENTRIES_PER_SECTOR; i++)
     {
         val = (uint32_t)i;
         nvs_write("AAAA", &val, sizeof(val));
     }
 
-    /* Fill sector 1 (255 entries of key "B"). */
-    for (int i = 0; i < 255; i++)
+    /* Fill sector 1 (ENTRIES_PER_SECTOR entries of key "B"). */
+    for (int i = 0; i < (int)ENTRIES_PER_SECTOR; i++)
     {
         val = (uint32_t)(i + 1000);
         nvs_write("BBBB", &val, sizeof(val));
@@ -244,10 +247,10 @@ static void test_garbage_collection(void)
     readback = 0;
     rc = nvs_read("BBBB", &readback, sizeof(readback), &out_len);
     TEST_ASSERT(rc == NVS_OK, "Read 'BBBB' returns NVS_OK");
-    TEST_ASSERT(readback == 1254, "Read 'BBBB' returns latest value (1254)");
+    TEST_ASSERT(readback == (uint32_t)(1000 + ENTRIES_PER_SECTOR - 1), "Read 'BBBB' returns latest value");
 
     /* Now fill sector 2 to trigger GC. */
-    for (int i = 0; i < 250; i++)
+    for (int i = 0; i < (int)ENTRIES_PER_SECTOR - 5; i++)
     {
         val = (uint32_t)(i + 5000);
         nvs_write("DDDD", &val, sizeof(val));
@@ -531,7 +534,7 @@ static void test_remount_after_sector_skip(void)
     /* Fill sector 0 completely. */
     char key[5];
     uint32_t val;
-    for (int i = 0; i < 255; i++)
+    for (int i = 0; i < (int)ENTRIES_PER_SECTOR; i++)
     {
         key[0] = 'K';
         key[1] = '0' + (char)(i / 100);
@@ -663,26 +666,25 @@ static void test_gc_no_reclaimable_space(void)
     test_mount_nvs();
 
     /*
-     * Fill all 3 sectors with unique keys so no entry is superseded.
+     * Fill all reclaimable sectors with unique keys so no entry is superseded.
      * Each entry: 8 B header + 4 B key + 4 B data = 16 B.
-     * Per sector: (4096 - 12) / 16 = 255 entries.
-     * Total unique keys: 255 * 3 = 765.
+     * Total unique keys: (FLASH_SECTOR_COUNT - 1) * ENTRIES_PER_SECTOR.
      *
-     * After filling sectors 0 and 1, sector 2 becomes Active.
-     * Fill sector 2 too. The *next* write should fail with NO_SPACE
+     * After filling sectors 0, 1 ... N-2, sector N-1 becomes Active.
+     * Fill sector N-1 too. The *next* write should fail with NO_SPACE
      * because GC can't reclaim any sector (all entries are live & unique).
      */
     char key[5];
     uint32_t val;
+    int total_unique = (int)(FLASH_SECTOR_COUNT * ENTRIES_PER_SECTOR);
     int fills_ok = 1;
-
-    for (int i = 0; i < 765; i++)
+    for (int i = 0; i < total_unique; i++)
     {
-        /* Generate unique 4-char keys: "A000" .. "A764" */
-        key[0] = (char)('A' + (i / 255));
-        key[1] = '0' + (char)((i % 255) / 100);
-        key[2] = '0' + (char)(((i % 255) / 10) % 10);
-        key[3] = '0' + (char)((i % 255) % 10);
+        /* Generate unique 4-char keys: "A000" .. */
+        key[0] = (char)('A' + (i / (int)ENTRIES_PER_SECTOR));
+        key[1] = '0' + (char)((i % (int)ENTRIES_PER_SECTOR) / 100);
+        key[2] = '0' + (char)(((i % (int)ENTRIES_PER_SECTOR) / 10) % 10);
+        key[3] = '0' + (char)((i % (int)ENTRIES_PER_SECTOR) % 10);
         key[4] = '\0';
         val = (uint32_t)i;
 
@@ -693,7 +695,7 @@ static void test_gc_no_reclaimable_space(void)
             break;
         }
     }
-    TEST_ASSERT(fills_ok, "765 unique entries written across 3 sectors");
+    TEST_ASSERT(fills_ok, "Unique entries written across reclaimable sectors");
 
     /* One more write should fail — flash is truly full. */
     val = 9999;
@@ -762,13 +764,13 @@ static void test_remount_after_gc(void)
      * forces GC on sector 0.  Then we remount.
      */
     uint32_t val;
-    for (int i = 0; i < 255; i++)
+    for (int i = 0; i < (int)ENTRIES_PER_SECTOR; i++)
     {
         val = (uint32_t)i;
         nvs_write("AAAA", &val, sizeof(val));
     }
 
-    for (int i = 0; i < 255; i++)
+    for (int i = 0; i < (int)ENTRIES_PER_SECTOR; i++)
     {
         val = (uint32_t)(i + 1000);
         nvs_write("BBBB", &val, sizeof(val));
@@ -779,7 +781,7 @@ static void test_remount_after_gc(void)
     nvs_write("CCCC", &val, sizeof(val));
 
     /* Fill sector 2 to trigger GC on sector 0. */
-    for (int i = 0; i < 252; i++)
+    for (int i = 0; i < (int)ENTRIES_PER_SECTOR - 3; i++)
     {
         val = (uint32_t)(i + 5000);
         nvs_write("DDDD", &val, sizeof(val));
@@ -802,7 +804,7 @@ static void test_remount_after_gc(void)
 
     rc = nvs_read("BBBB", &readback, sizeof(readback), &out_len);
     TEST_ASSERT(rc == NVS_OK, "BBBB readable after GC + remount");
-    TEST_ASSERT(readback == 1254, "BBBB value correct (1254)");
+    TEST_ASSERT(readback == (uint32_t)(1000 + ENTRIES_PER_SECTOR - 1), "BBBB value correct");
 }
 
 static void test_delete_followed_by_gc(void)
@@ -820,7 +822,7 @@ static void test_delete_followed_by_gc(void)
      * remain NOT_FOUND.
      */
     uint32_t val;
-    for (int i = 0; i < 255; i++)
+    for (int i = 0; i < (int)ENTRIES_PER_SECTOR; i++)
     {
         val = (uint32_t)i;
         nvs_write("DEL1", &val, sizeof(val));
@@ -830,14 +832,14 @@ static void test_delete_followed_by_gc(void)
     nvs_delete("DEL1");
 
     /* Fill sector 1 with a different key. */
-    for (int i = 0; i < 255; i++)
+    for (int i = 0; i < (int)ENTRIES_PER_SECTOR; i++)
     {
         val = (uint32_t)(i + 2000);
         nvs_write("KEEP", &val, sizeof(val));
     }
 
     /* Fill sector 2 to trigger GC on sector 0. */
-    for (int i = 0; i < 253; i++)
+    for (int i = 0; i < (int)ENTRIES_PER_SECTOR - 2; i++)
     {
         val = (uint32_t)(i + 4000);
         nvs_write("FILL", &val, sizeof(val));
@@ -858,7 +860,7 @@ static void test_delete_followed_by_gc(void)
     /* KEEP should survive. */
     rc = nvs_read("KEEP", &readback, sizeof(readback), &out_len);
     TEST_ASSERT(rc == NVS_OK, "Non-deleted key survives GC");
-    TEST_ASSERT(readback == 2254, "Non-deleted key value correct (2254)");
+    TEST_ASSERT(readback == (uint32_t)(2000 + ENTRIES_PER_SECTOR - 1), "Non-deleted key value correct");
 }
 
 static void test_repeated_gc_cycles(void)
