@@ -17,7 +17,9 @@
       "PowerShell(& \"c:\\\\Users\\\\George\\\\Desktop\\\\workspace\\\\development\\\\nvs\\\\build\\\\ctest.exe\" 2>&1)",
       "PowerShell(tail -20)",
       "PowerShell(\\($output = & \"c:\\\\Users\\\\George\\\\Desktop\\\\workspace\\\\development\\\\nvs\\\\build\\\\ctest.exe\" 2>&1\\); $output[-15..-1] -join \"`n\")",
-      "PowerShell(\\($output = & \"c:\\\\Users\\\\George\\\\Desktop\\\\workspace\\\\development\\\\nvs\\\\build\\\\ctest.exe\" 2>&1\\); $lines = @\\($output\\); $lines | Select-Object -Last 50 | Where-Object { $_ -match \"Issue|summary|CONFIRMED|result|======\" })"
+      "PowerShell(\\($output = & \"c:\\\\Users\\\\George\\\\Desktop\\\\workspace\\\\development\\\\nvs\\\\build\\\\ctest.exe\" 2>&1\\); $lines = @\\($output\\); $lines | Select-Object -Last 50 | Where-Object { $_ -match \"Issue|summary|CONFIRMED|result|======\" })",
+      "Bash(echo \"Exit code: $?\")",
+      "Read(//tmp/**)"
     ]
   }
 }
