@@ -36,7 +36,7 @@ void flash_erase_sector(uint32_t addr)
     {
         return; // Simple bounds check
     }
-    // Set 64KB (65536 bytes) to 0xFF
+    /* Set FLASH_SECTOR_SIZE bytes (4096) to 0xFF */
     memset(&fcb_flash[base_addr], 0xFF, FLASH_SECTOR_SIZE);
 }
 

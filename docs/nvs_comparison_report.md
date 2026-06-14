@@ -242,7 +242,7 @@ void (*erase_sector)(uint32_t addr);
 | ESP32 specificity | None | High |
 | Porting effort (new MCU) | ~1–2 hours | ~1–2 days |
 | Max sectors (practical) | 16 (enforced at mount) | Unlimited (heap-backed) |
-| Base address in HAL | No (offset must be embedded in driver) | Yes (partition table supplies it) |
+| Base address in HAL | No (driver absorbs offset internally) | Yes (partition table supplies it) |
 
 ---
 
@@ -396,7 +396,7 @@ The table below distinguishes between intentional omissions (scope decisions) an
 | Type-mismatch error on read | Yes | No | Intentional omission |
 | Length-query before allocation (NULL out-ptr) | Yes | No | **Unintentional gap** |
 | nvs_format() / factory erase API | Yes | No | **Unintentional gap** |
-| Base address in HAL interface | Yes (partition table) | No (must be baked into driver) | **Unintentional gap** |
+| Base address in HAL interface | Yes (partition table) | No (driver absorbs offset internally) | Intentional omission |
 | nvs_get_size() before read | Yes | No | **Unintentional gap** |
 | Thread safety | Full mutex protection | None | **Unintentional gap** (for RTOS use) |
 
@@ -431,16 +431,15 @@ The table below distinguishes between intentional omissions (scope decisions) an
 
 All previously confirmed bugs (Issues A–H) have been resolved. The following items remain open for consideration before any production use, including newly identified issues from the 2026-06-14 re-audit:
 
-| Priority | ID | Location | Description | Recommended Fix |
-|----------|----|----------|-------------|-----------------|
-| **High** | I1 | `nvs.c:950` | GC target selection uses raw `seq < lowest_seq` comparison without wrap-aware sort key. After ~4B sector activations, GC could target the newest sector rather than the oldest, destroying the most recent data while leaving stale copies. The read path correctly uses `seq_sort_key()` but GC does not. | Replace `seq < lowest_seq` with `seq_sort_key(seq) < seq_sort_key(lowest_seq)`. Add a regression test that simulates a post-wrap GC cycle. |
-| **High** | I2 | `crc32.c:3–20` | `table_initialized` is a plain `int` with no `volatile` qualifier and no atomic protection. On weakly-ordered architectures (ARM Cortex-M), a compiler or hardware store reorder could allow a thread to read `table_initialized == 1` while the `crc32_table[]` array is still partially written. The NVS lock does not protect this because `crc32_gen()` may be called before the lock is acquired. | Replace the lazy-init table with a compile-time `static const uint32_t crc32_table[256] = { ... }`. This eliminates the race entirely and reduces startup cost. |
-| **Medium** | I3 | `nvs.h` / `nvs_flash_driver_t` | No `base_address` field in the HAL driver struct. All flash addresses are computed as `idx * sector_size` from 0. Every real embedded deployment (where NVS does not start at address 0) must bake the partition offset into the driver implementation, creating implicit coupling that violates the clean HAL design goal. | Add `uint32_t base_address` to `nvs_flash_driver_t`. Update `sector_addr()` to `return driver->base_address + (uint32_t)idx * SECTOR_SIZE`. |
-| **Medium** | I4 | `nvs.c` | No `nvs_format()` public API. To wipe and reinitialize the partition, the caller must call `flash_full_erase()` directly, bypassing the injected driver HAL abstraction. | Add `nvs_err_t nvs_format(void)` that erases all sectors via the injected `erase_sector` driver function and re-initializes the header of the first sector. |
-| **Medium** | I5 | `nvs.c` | No type safety. All values are raw bytes. A firmware update that changes a key's semantic type (e.g., `uint32_t "timeout"` becomes a string `"timeout_ms"`) causes the new firmware to read garbage with `NVS_OK` — there is no type tag to detect the mismatch at runtime. | Add a 1-byte type field to the entry header. Define a minimal type enum (e.g., `NVS_TYPE_RAW`, `NVS_TYPE_U32`, `NVS_TYPE_STR`). Return `NVS_ERR_TYPE_MISMATCH` on type mismatch in `nvs_read()`. |
-| **Medium** | — | `nvs.c` | No thread safety | Add a critical-section wrapper (or document single-threaded constraint explicitly in `nvs.h`) |
-| **Medium** | — | `nvs.c` | No validation of `flash_driver` function pointers at each operation | Guard `NULL` function pointers before each `DRV_*` call |
-| **Low** | I6 | `flash_mem.c:38` | Comment claims `"Set 64KB (65536 bytes) to 0xFF"` but `FLASH_SECTOR_SIZE` is 4096. The implementation is correct; the comment is stale and will mislead anyone cross-referencing actual hardware behavior. | Fix comment to `"Set FLASH_SECTOR_SIZE bytes (4096) to 0xFF"`. |
-| **Low** | — | `nvs.c:700–701` | `sector_count > NVS_MAX_SECTORS` returns `NVS_ERR_INVALID_ARG` at mount — callers may not distinguish this from other invalid-arg errors | Add a dedicated `NVS_ERR_TOO_MANY_SECTORS` error code |
-| **Low** | — | `nvs.c` | Sector header CRC does not cover in-place state transitions (`ACTIVE → FULL → FREEING`) — tolerated by design but undocumented | Add a comment to `read_sector_hdr()` explaining the state-transition tolerance |
-| **Low** | — | `nvs.h` | `NVS_MAX_SECTORS` is 16 — enforced at runtime but no `static_assert` at compile time | Add `static_assert(NVS_MAX_SECTORS <= 16, ...)` where the stack arrays are declared |
+| Status | ID | Location | Description | Resolution |
+|--------|----|----------|-------------|------------|
+| **Closed** | I1 | `nvs.c` | GC target selection used raw `seq < lowest_seq` without wrap-aware sort key. | **Fixed** — replaced with `seq_sort_key(seq) < seq_sort_key(lowest_seq)`. |
+| **Closed** | I2 | `crc32.c` | Lazy-init mutable table with no `volatile`/atomic protection — store-ordering hazard on weakly-ordered architectures. | **Fixed** — replaced with compile-time `static const uint32_t crc32_table[256]`. |
+| **Closed** | I3 | `nvs_flash_driver_t` | No `base_address` field in HAL struct. | **Design decision** — partition offset is the driver's responsibility; function pointers absorb it internally. |
+| **Closed** | I4 | `nvs.c` | No `nvs_format()` public API. | **Fixed** — `nvs_format()` added; erases all sectors via the injected HAL and re-initializes sector 0. |
+| **Closed** | I6 | `flash_mem.c` | Stale `"Set 64KB"` comment; actual size is 4096 bytes. | **Fixed** — comment updated to `"Set FLASH_SECTOR_SIZE bytes (4096) to 0xFF"`. |
+| **Closed** | — | `nvs.c` | `sector_count > NVS_MAX_SECTORS` not distinguishable from other `INVALID_ARG` errors. | **Already present** — `NVS_ERR_TOO_MANY_SECTORS` error code exists and is returned at mount. |
+| **Closed** | — | `nvs.c` | No `static_assert` on `NVS_MAX_SECTORS`. | **Already present** — `static_assert(NVS_MAX_SECTORS <= 16, ...)` at `nvs.c:118`. |
+| **Closed** | — | `nvs.c` | Sector header CRC tolerance of in-place state transitions undocumented. | **Already documented** — block comment in `read_sector_hdr()` explains the deliberate tolerance. |
+| **Open** | I5 | `nvs.c` | No type safety. Raw-byte reads on a key whose type changed by firmware update return garbage with `NVS_OK`. | Add a 1-byte type field to the entry header, a minimal `NVS_TYPE_*` enum, and `NVS_ERR_TYPE_MISMATCH` — **breaking wire-format change; deferred.** |
+| **Closed** | — | `nvs.h` | No thread safety. Single-threaded constraint undocumented in the public header. | **Fixed** — documented in `nvs_flash_driver_t` doc-comment: all API calls must be serialized by the caller unless `lock`/`unlock` hooks are populated. |

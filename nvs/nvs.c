@@ -106,6 +106,7 @@ static nvs_err_t nvs_gc_resume(uint32_t target_base, uint32_t target_seq);
 static nvs_err_t nvs_gc(void);
 static nvs_err_t activate_empty_sector_only(void);
 static nvs_err_t activate_next_sector(void);
+static nvs_err_t nvs_format_impl(void);
 
 /*===========================================================================
  *  Global variables
@@ -428,6 +429,19 @@ nvs_err_t nvs_delete(const char *key)
 
     NVS_UNLOCK();
     return ctx.found ? NVS_OK : NVS_ERR_NOT_FOUND;
+}
+
+nvs_err_t nvs_format(void)
+{
+    if (!nvs_is_mounted())
+    {
+        return NVS_ERR_INVALID_ARG;
+    }
+
+    NVS_LOCK();
+    nvs_err_t rc = nvs_format_impl();
+    NVS_UNLOCK();
+    return rc;
 }
 
 /*===========================================================================
@@ -947,7 +961,8 @@ static nvs_err_t nvs_gc(void)
         {
             continue;
         }
-        if (state == NVS_SECTOR_FULL && seq < lowest_seq)
+        if (state == NVS_SECTOR_FULL
+            && seq_sort_key(seq) < seq_sort_key(lowest_seq))
         {
             lowest_seq = seq;
             target_idx = (int)i;
@@ -1009,4 +1024,23 @@ static nvs_err_t activate_next_sector(void)
     }
 
     return activate_empty_sector_only();
+}
+
+/*===========================================================================
+ *  Static local functions — format
+ *===========================================================================*/
+
+static nvs_err_t nvs_format_impl(void)
+{
+    for (uint8_t i = 0; i < SECTOR_COUNT; i++)
+    {
+        DRV_ERASE(sector_addr(i));
+    }
+
+    g_nvs.seq_counter        = 1;
+    g_nvs.active_sector_addr = sector_addr(0);
+    g_nvs.write_offset       = NVS_SECTOR_HDR_SIZE;
+
+    write_sector_hdr(sector_addr(0), 1, NVS_SECTOR_ACTIVE);
+    return NVS_OK;
 }

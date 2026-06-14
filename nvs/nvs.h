@@ -59,6 +59,10 @@ typedef enum
  * The caller fills in the function pointers and flash geometry,
  * then passes a pointer to nvs_mount().  The NVS module stores
  * a copy internally and never references a concrete flash HAL.
+ *
+ * Thread safety: all public API calls (nvs_mount, nvs_read, nvs_write,
+ * nvs_delete, nvs_format) must be serialized by the caller unless the
+ * optional lock/unlock hooks below are populated.
  */
 typedef struct
 {
@@ -187,5 +191,15 @@ nvs_err_t nvs_read(const char *key, void *buf, uint8_t buf_size, uint8_t *out_le
  * @return NVS_OK on success, NVS_ERR_NOT_FOUND if key does not exist.
  */
 nvs_err_t nvs_delete(const char *key);
+
+/**
+ * @brief Erase all NVS sectors and re-initialize the first sector as ACTIVE.
+ *
+ * All stored key-value pairs are permanently destroyed.  The NVS driver must
+ * have been mounted before calling this function.
+ *
+ * @return NVS_OK on success, NVS_ERR_INVALID_ARG if the driver is not mounted.
+ */
+nvs_err_t nvs_format(void);
 
 #endif /* NVS_H */
