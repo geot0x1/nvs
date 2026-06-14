@@ -9,6 +9,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 # Source files
 set(SOURCES
     main.c
+    tests/test_stress.c
 )
 
 # Add subdirectories

@@ -25,7 +25,8 @@
       "PowerShell(head -20)",
       "Bash(cmake --build build -j)",
       "Bash(build\\\\ctest.exe)",
-      "PowerShell(cd \"C:\\\\Users\\\\George\\\\Desktop\\\\workspace\\\\development\\\\nvs\\\\build\"; .\\\\ctest.exe 2>&1 | ForEach-Object { $_ } | Select-Object -Skip \\($\\(.\\\\ctest.exe 2>&1 | Select-String -Pattern \"Issue C\" -SimpleMatch | Select-Object -First 1\\).LineNumber - 1\\) | Select-Object -First 30)"
+      "PowerShell(cd \"C:\\\\Users\\\\George\\\\Desktop\\\\workspace\\\\development\\\\nvs\\\\build\"; .\\\\ctest.exe 2>&1 | ForEach-Object { $_ } | Select-Object -Skip \\($\\(.\\\\ctest.exe 2>&1 | Select-String -Pattern \"Issue C\" -SimpleMatch | Select-Object -First 1\\).LineNumber - 1\\) | Select-Object -First 30)",
+      "PowerShell(cd \"C:\\\\Users\\\\George\\\\Desktop\\\\workspace\\\\development\\\\nvs\\\\build\"; .\\\\ctest.exe 2>&1 | Select-String -Pattern \"Results:|Issue summary:|PASS|FAIL|Stress Test [123]:|Stress suite\" | ForEach-Object { $_.Line.Trim\\(\\) })"
     ]
   }
 }

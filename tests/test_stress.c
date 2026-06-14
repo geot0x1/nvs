@@ -34,22 +34,20 @@
 
 /*===========================================================================
  *  Shared assert machinery
- *  g_pass / g_fail are defined in main.c and already in scope because this
- *  file is #include'd directly into main.c as a translation unit.
  *===========================================================================*/
 
-#define STRESS_ASSERT(cond, msg)                                          \
+#define STRESS_ASSERT(pass_p, fail_p, cond, msg)                          \
     do                                                                    \
     {                                                                     \
         if (cond)                                                         \
         {                                                                 \
             printf("  [PASS] %s\n", (msg));                               \
-            g_pass++;                                                     \
+            (*(pass_p))++;                                                \
         }                                                                 \
         else                                                              \
         {                                                                 \
             printf("  [FAIL] %s  (line %d)\n", (msg), __LINE__);         \
-            g_fail++;                                                     \
+            (*(fail_p))++;                                                \
         }                                                                 \
     } while (0)
 
@@ -91,7 +89,7 @@ static void make_stress_key(char *out, int idx)
  * Every time a full sector's worth of writes is completed the flash headers are
  * printed so the ACTIVE → FULL → FREEING → EMPTY cycle can be tracked.
  */
-void test_stress_single_key_churn(void)
+static void test_stress_single_key_churn(int *pass, int *fail)
 {
     printf("\n=== Stress Test 1: Single-key churn (10 000 writes) ===\n");
 
@@ -127,16 +125,16 @@ void test_stress_single_key_churn(void)
         }
     }
 
-    STRESS_ASSERT(all_writes_ok, "10 000 single-key writes all return NVS_OK");
+    STRESS_ASSERT(pass, fail, all_writes_ok, "10 000 single-key writes all return NVS_OK");
 
     /* Read back and verify the final value. */
     uint32_t readback = 0;
     uint8_t  out_len  = 0;
     nvs_err_t rc = nvs_read("CHURN", &readback, sizeof(readback), &out_len);
 
-    STRESS_ASSERT(rc == NVS_OK,               "Read after churn returns NVS_OK");
-    STRESS_ASSERT(out_len == sizeof(uint32_t), "Read length is correct");
-    STRESS_ASSERT(readback == (uint32_t)(total_writes - 1),
+    STRESS_ASSERT(pass, fail, rc == NVS_OK,               "Read after churn returns NVS_OK");
+    STRESS_ASSERT(pass, fail, out_len == sizeof(uint32_t), "Read length is correct");
+    STRESS_ASSERT(pass, fail, readback == (uint32_t)(total_writes - 1),
                   "Final value matches last written value");
 
     printf("  [INFO] Expected %u, got %u\n", (unsigned)(total_writes - 1), readback);
@@ -153,7 +151,7 @@ void test_stress_single_key_churn(void)
  * taken every SNAPSHOT_INTERVAL writes to observe sector layout under sustained
  * multi-key pressure.
  */
-void test_stress_multi_key_interleaved(void)
+static void test_stress_multi_key_interleaved(int *pass, int *fail)
 {
     printf("\n=== Stress Test 2: Multi-key interleaved writes + reads (10 000 writes) ===\n");
 
@@ -227,8 +225,8 @@ void test_stress_multi_key_interleaved(void)
         }
     }
 
-    STRESS_ASSERT(all_writes_ok, "10 000 multi-key writes all return NVS_OK");
-    STRESS_ASSERT(all_reads_ok,  "All periodic read-backs return correct values");
+    STRESS_ASSERT(pass, fail, all_writes_ok, "10 000 multi-key writes all return NVS_OK");
+    STRESS_ASSERT(pass, fail, all_reads_ok,  "All periodic read-backs return correct values");
 
     /* Final read-back of all 8 keys. */
     int final_ok = 1;
@@ -251,7 +249,7 @@ void test_stress_multi_key_interleaved(void)
         }
     }
 
-    STRESS_ASSERT(final_ok, "All 8 keys hold correct final values after 10 000 writes");
+    STRESS_ASSERT(pass, fail, final_ok, "All 8 keys hold correct final values after 10 000 writes");
     printf("  [INFO] Total flash snapshots taken: %d\n", snapshot_count);
 }
 
@@ -266,7 +264,7 @@ void test_stress_multi_key_interleaved(void)
  *   3. Reads back every key and asserts the value matches.
  * A flash snapshot is printed at cycle 1, 10, 25, and 50.
  */
-void test_stress_remount_integrity(void)
+static void test_stress_remount_integrity(int *pass, int *fail)
 {
     printf("\n=== Stress Test 3: Remount integrity under write pressure (50 cycles × 20 keys) ===\n");
 
@@ -356,22 +354,22 @@ void test_stress_remount_integrity(void)
         }
     }
 
-    STRESS_ASSERT(all_ok, "All 20 keys survive 50 remount/write/read cycles with correct values");
+    STRESS_ASSERT(pass, fail, all_ok, "All 20 keys survive 50 remount/write/read cycles with correct values");
 }
 
 /*===========================================================================
  *  Entry point (called from main.c)
  *===========================================================================*/
 
-void run_stress_tests(void)
+void run_stress_tests(int *pass, int *fail)
 {
     printf("\n========================================\n");
     printf("  NVS Stress Test Suite\n");
     printf("========================================\n");
 
-    test_stress_single_key_churn();
-    test_stress_multi_key_interleaved();
-    test_stress_remount_integrity();
+    test_stress_single_key_churn(pass, fail);
+    test_stress_multi_key_interleaved(pass, fail);
+    test_stress_remount_integrity(pass, fail);
 
     printf("\n========================================\n");
     printf("  Stress suite complete\n");

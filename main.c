@@ -21,7 +21,7 @@ static int g_bug  = 0;
 static int g_ok   = 0;
 static int g_amb  = 0;
 
-#include "test_stress.c"
+void run_stress_tests(int *pass, int *fail);
 
 /* Inline flash simulator for Issue F (255 sectors) */
 #define FF_SECTOR_SIZE   64U
@@ -1533,7 +1533,7 @@ int main(void)
            g_bug, g_ok, g_amb);
     printf("========================================\n");
 
-    run_stress_tests();
+    run_stress_tests(&g_pass, &g_fail);
 
     return g_fail > 0 ? 1 : 0;
 }
