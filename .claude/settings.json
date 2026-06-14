@@ -19,7 +19,10 @@
       "PowerShell(\\($output = & \"c:\\\\Users\\\\George\\\\Desktop\\\\workspace\\\\development\\\\nvs\\\\build\\\\ctest.exe\" 2>&1\\); $output[-15..-1] -join \"`n\")",
       "PowerShell(\\($output = & \"c:\\\\Users\\\\George\\\\Desktop\\\\workspace\\\\development\\\\nvs\\\\build\\\\ctest.exe\" 2>&1\\); $lines = @\\($output\\); $lines | Select-Object -Last 50 | Where-Object { $_ -match \"Issue|summary|CONFIRMED|result|======\" })",
       "Bash(echo \"Exit code: $?\")",
-      "Read(//tmp/**)"
+      "Read(//tmp/**)",
+      "Bash(cmake --build build --config Release)",
+      "Bash(ctest --output-on-failure)",
+      "PowerShell(head -20)"
     ]
   }
 }

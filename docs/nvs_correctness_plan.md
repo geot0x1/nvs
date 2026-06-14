@@ -35,30 +35,6 @@ Results from the latest test run used to drive this plan:
 
 ---
 
-### Step 1 — Extend sector header layout to 16 bytes
-
-**Fixes:** Pre-condition for Steps 4 and 5
-
-**Description:** `NVS_SECTOR_HDR_SIZE` is currently `12U`. The 4-byte CRC field added
-in Steps 7 and 8 requires 16 bytes. Updating the constant now lets the rest of the
-codebase compile and size buffers correctly before the CRC logic is wired in.
-
-**File:** `nvs/nvs.h`
-
-**Action:** Change `NVS_SECTOR_HDR_SIZE` from `12U` to `16U`. Update the layout comment:
-```
-Offset  Field    Size   Notes
-0x00    magic    4 B    0x4E565321
-0x04    seq_num  4 B    monotonically increasing
-0x08    state    4 B    Empty / Active / Full / Freeing
-0x0C    crc32    4 B    CRC32 over bytes 0x00–0x0B
-```
-
-**Test:** Project compiles without errors. All existing passing tests still pass
-(sector sizes in test fixtures must be large enough to accommodate the 4-byte extension).
-
----
-
 ### Step 2 — Bounds-check `data_len` before the stack buffer read in `nvs_read()`
 
 **Fixes:** Issue A
@@ -525,7 +501,6 @@ all-pass result.
 
 | Step | Fixes | File | Test |
 |------|-------|------|------|
-| 1  | Pre-condition: header size extended to 16 B | `nvs.h` | Compiles; no regressions |
 | 2  | Issue A: `nvs_read` stack overflow | `nvs.c` | `test_issue_A.c` exits 0 |
 | 3  | Issue F: `sector_count > 16` crash; add `NVS_MAX_SECTORS` | `nvs.h` + `nvs.c` | `test_issue_F.c` exits 0 |
 | 4  | Header CRC written on format | `nvs.c` | CRC round-trip assertion passes |
