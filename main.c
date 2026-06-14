@@ -1535,5 +1535,11 @@ int main(void)
 
     run_stress_tests(&g_pass, &g_fail);
 
-    return g_fail > 0 ? 1 : 0;
+    int total_failures = g_fail + g_bug;
+    printf("\n========================================\n");
+    printf("  TOTAL: %d passed, %d failed (%d functional, %d confirmed bugs)\n",
+           g_pass + g_ok, total_failures, g_fail, g_bug);
+    printf("========================================\n");
+
+    return total_failures > 0 ? 1 : 0;
 }
