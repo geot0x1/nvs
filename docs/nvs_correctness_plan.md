@@ -35,21 +35,6 @@ Results from the latest test run used to drive this plan:
 
 ---
 
-### Step 6 — Verify Issue E is closed
-
-**Description:** After Steps 7 and 8, a torn zombie sector header must no longer accept a
-`0xFFFFFFFF` seq_num as valid, so `seq_counter` cannot be poisoned and read-order
-inversion cannot occur.
-
-**File:** `tests/test_nvs_issues.c` — `test_issue_E_seq_poisoning()`
-
-**Action:** No code change. Run the test and confirm both assertions report `[PASS]`.
-
-**Test:** `seq_counter` must not be poisoned (newly activated sector must not get `seq = 0`).
-`nvs_read("dup")` must return the newest value `999`, not the stale value `111`.
-
----
-
 ### Step 7 — Detect all-FULL flash in `nvs_mount()` and run GC before formatting
 
 **Fixes:** Issues B1, B2
@@ -346,7 +331,6 @@ all-pass result.
 
 | Step | Fixes | File | Test |
 |------|-------|------|------|
-| 6  | Issue E: seq_counter poisoning | — (test only) | `test_issue_E_seq_poisoning` → `[PASS]` |
 | 7  | Issues B1, B2: all-FULL data loss | `nvs.c` | `test_issue_B1` and `test_issue_B2` → `[PASS]` |
 | 8  | Issue C: torn slot corrupts next write | `nvs.c` | `test_issue_C_torn_residue` → `[PASS]` |
 | 9  | Pre-condition: `nvs_gc_resume()` helper extracted | `nvs.c` | All existing tests still pass |
