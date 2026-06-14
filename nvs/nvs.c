@@ -35,6 +35,16 @@ static inline uint32_t align4(uint32_t v)
     return (v + 3U) & ~3U;
 }
 
+/**
+ * Map a sequence number to a comparable ordinal for descending-sort purposes.
+ * seq=0 indicates a counter wrap (UINT32_MAX -> 0) and is treated as the
+ * highest possible ordinal so that it always sorts before any non-zero seq.
+ */
+static inline uint32_t seq_sort_key(uint32_t seq)
+{
+    return (seq == 0) ? 0xFFFFFFFFU : seq;
+}
+
 /** Calculate the total on-flash size of an entry. */
 static inline uint32_t entry_total_size(uint8_t key_len, uint8_t data_len)
 {
@@ -297,7 +307,7 @@ static void get_sectors_by_seq_desc(uint8_t *out_indices, uint8_t *out_count)
         uint32_t s = seqs[i];
         uint8_t  v = valid[i];
         int j = (int)i - 1;
-        while (j >= 0 && seqs[j] < s)
+        while (j >= 0 && seq_sort_key(seqs[j]) < seq_sort_key(s))
         {
             seqs[j + 1]  = seqs[j];
             valid[j + 1] = valid[j];
@@ -563,7 +573,7 @@ static int newer_copy_exists(const char *key, uint8_t key_len, uint32_t src_seq)
         {
             continue;
         }
-        if (seq <= src_seq)
+        if (seq_sort_key(seq) <= seq_sort_key(src_seq))
         {
             continue;
         }

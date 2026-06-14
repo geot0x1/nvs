@@ -136,7 +136,7 @@ static void test_issue_C_torn_residue(void)
     th_mount();
 
     uint32_t v1 = 111;
-    nvs_write("vict", &v1, sizeof(v1)); /* 16-byte entry at offset 12 */
+    nvs_write("vict", &v1, sizeof(v1)); /* 16-byte entry at offset NVS_SECTOR_HDR_SIZE */
 
     /* Power loss between body-write and state-commit: body fully programmed,
      * state byte still 0xFF (Writing).  This is the exact intermediate state
@@ -154,13 +154,39 @@ static void test_issue_C_torn_residue(void)
     torn[6] = (uint8_t)(c >> 16); torn[7] = (uint8_t)(c >> 24);
     memcpy(&torn[8], "tornkey", 7);
     memset(&torn[15], 0x55, 8);
-    flash_write(12 + 16, torn, 24);
+    /* Torn entry placed immediately after the committed "vict" entry.
+     * "vict" occupies NVS_SECTOR_HDR_SIZE .. NVS_SECTOR_HDR_SIZE+15 (16 bytes). */
+    flash_write(NVS_SECTOR_HDR_SIZE + 16, torn, 24);
 
-    th_mount(); /* mount stops at the 0xFF state byte -> write_offset = 28 */
+    th_mount(); /* mount detects 0xFF state byte, marks DELETED, advances write_offset past it */
+
+    /* Debug: print flash state after mount */
+    {
+        uint8_t dbg[80];
+        flash_read(NVS_SECTOR_HDR_SIZE, dbg, sizeof(dbg));
+        printf("  [DBG] flash[%u..%u] after 2nd mount:\n", NVS_SECTOR_HDR_SIZE, NVS_SECTOR_HDR_SIZE+79);
+        for (int _i = 0; _i < 80; _i += 8)
+        {
+            printf("  [DBG]  +%02d: %02X %02X %02X %02X %02X %02X %02X %02X\n",
+                   _i, dbg[_i],dbg[_i+1],dbg[_i+2],dbg[_i+3],dbg[_i+4],dbg[_i+5],dbg[_i+6],dbg[_i+7]);
+        }
+    }
 
     /* A new committed write for 'vict' lands on top of the torn residue. */
     uint32_t v2 = 222;
     nvs_err_t wr = nvs_write("vict", &v2, sizeof(v2));
+
+    /* Debug: print flash state after write */
+    {
+        uint8_t dbg[80];
+        flash_read(NVS_SECTOR_HDR_SIZE, dbg, sizeof(dbg));
+        printf("  [DBG] flash[%u..%u] after nvs_write(vict,222):\n", NVS_SECTOR_HDR_SIZE, NVS_SECTOR_HDR_SIZE+79);
+        for (int _i = 0; _i < 80; _i += 8)
+        {
+            printf("  [DBG]  +%02d: %02X %02X %02X %02X %02X %02X %02X %02X\n",
+                   _i, dbg[_i],dbg[_i+1],dbg[_i+2],dbg[_i+3],dbg[_i+4],dbg[_i+5],dbg[_i+6],dbg[_i+7]);
+        }
+    }
 
     uint32_t rb = 0; uint8_t ol = 0;
     nvs_err_t rr = nvs_read("vict", &rb, sizeof(rb), &ol);

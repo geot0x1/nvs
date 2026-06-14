@@ -24,7 +24,8 @@
       "Bash(ctest --output-on-failure)",
       "PowerShell(head -20)",
       "Bash(cmake --build build -j)",
-      "Bash(build\\\\ctest.exe)"
+      "Bash(build\\\\ctest.exe)",
+      "PowerShell(cd \"C:\\\\Users\\\\George\\\\Desktop\\\\workspace\\\\development\\\\nvs\\\\build\"; .\\\\ctest.exe 2>&1 | ForEach-Object { $_ } | Select-Object -Skip \\($\\(.\\\\ctest.exe 2>&1 | Select-String -Pattern \"Issue C\" -SimpleMatch | Select-Object -First 1\\).LineNumber - 1\\) | Select-Object -First 30)"
     ]
   }
 }

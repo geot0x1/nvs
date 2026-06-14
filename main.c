@@ -1108,7 +1108,8 @@ static void test_issue_C_torn_residue(void)
     torn[6] = (uint8_t)(c >> 16); torn[7] = (uint8_t)(c >> 24);
     memcpy(&torn[8], "tornkey", 7);
     memset(&torn[15], 0x55, 8);
-    flash_write(12 + 16, torn, 24);
+    /* Torn entry placed immediately after "vict" (NVS_SECTOR_HDR_SIZE + 16 bytes). */
+    flash_write(NVS_SECTOR_HDR_SIZE + 16, torn, 24);
 
     th_mount();
 
