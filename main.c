@@ -1099,6 +1099,49 @@ static void test_issue_C_torn_residue(void)
     }
 }
 
+static void test_mount_scan_corrupt_entry_sizes(void)
+{
+    printf("\n--- Mount scan: corrupt entry sizes do not crash ---\n");
+    flash_full_erase();
+    th_mount();
+
+    /* Write one valid entry to establish baseline. */
+    uint32_t v1 = 111;
+    nvs_write("good", &v1, sizeof(v1)); /* 16-byte entry at offset 12 */
+
+    /* Plant a corrupt entry with oversized key_len and data_len.
+     * This simulates flash corruption where size fields wrap to 0xFF.
+     * The entry_total_size(0xFF, 0xFF) would try to advance past sector bounds
+     * if not bounds-checked.  We just verify mount doesn't crash. */
+    uint32_t corrupt_offset = 12 + 16;
+    uint8_t corrupt_hdr[8];
+    memset(corrupt_hdr, 0xFF, sizeof(corrupt_hdr));
+    corrupt_hdr[0] = 0xFE;     /* state = VALID (so mount scan enters the entry) */
+    corrupt_hdr[1] = 0xFF;     /* key_len = 255 (oversized, should trigger bounds check) */
+    corrupt_hdr[2] = 0xFF;     /* data_len = 255 (oversized) */
+    corrupt_hdr[3] = 0xFF;
+    corrupt_hdr[4] = 0x00;     /* fake CRC */
+    corrupt_hdr[5] = 0x00;
+    corrupt_hdr[6] = 0x00;
+    corrupt_hdr[7] = 0x00;
+    flash_write(corrupt_offset, corrupt_hdr, sizeof(corrupt_hdr));
+
+    /* Remount: the mount scan should detect bounds violation and BREAK,
+     * preventing entry_total_size(0xFF, 0xFF) from being called on corrupt data.
+     * This test just verifies no crash occurs. */
+    nvs_err_t mount_rc = th_mount();
+
+    if (mount_rc == NVS_OK)
+    {
+        REPORT_PASS("mount scan handled corrupt entry sizes without crash");
+    }
+    else
+    {
+        printf("  observed: nvs_mount rc=%d (expected NVS_OK)\n", mount_rc);
+        REPORT_FAIL("mount scan crashed or returned error on corrupt sizes");
+    }
+}
+
 static void test_issue_D_gc_cannot_relocate(void)
 {
     printf("\n--- Issue D: GC fails to reclaim mostly-dead sectors (NO_SPACE) ---\n");
@@ -1335,6 +1378,7 @@ int main(int argc, char **argv)
     test_issue_B1_all_full_remount();
     test_issue_B2_full_no_active();
     test_issue_C_torn_residue();
+    test_mount_scan_corrupt_entry_sizes();
     test_issue_D_gc_cannot_relocate();
     test_issue_E_seq_poisoning();
     test_issue_G_no_crc_fallback();

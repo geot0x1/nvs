@@ -483,6 +483,11 @@ nvs_err_t nvs_mount(const nvs_flash_driver_t *driver)
             break;
         }
 
+        if (kl == 0 || kl > NVS_MAX_KEY_LEN || dl > NVS_MAX_DATA_LEN)
+        {
+            break;
+        }
+
         uint32_t esz = entry_total_size(kl, dl);
         if (esz == 0 || off + esz > SECTOR_SIZE)
         {
