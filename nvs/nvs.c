@@ -229,6 +229,7 @@ static int newer_copy_exists(const char *key, uint8_t key_len, uint32_t src_seq)
 static nvs_err_t nvs_gc_resume(uint32_t target_base, uint32_t target_seq)
 {
     uint32_t off = NVS_SECTOR_HDR_SIZE;
+    set_sector_state(target_base, NVS_SECTOR_FREEING);
     int all_copied = 1;
     while (off < SECTOR_SIZE)
     {

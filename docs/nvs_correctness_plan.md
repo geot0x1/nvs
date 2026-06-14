@@ -35,36 +35,6 @@ Results from the latest test run used to drive this plan:
 
 ---
 
-### Step 10 — Add `NVS_SECTOR_FREEING` state constant and transition to it before GC copy
-
-**Fixes:** Power-loss safety during GC
-
-**Description:** Depends on `NVS_SECTOR_FREEING` constant added in Step 1.
-A `FREEING` marker written before the copy loop lets `nvs_mount()` detect and resume
-interrupted GC. If power is lost after some entries have been copied to the destination
-but before the source sector is erased, the source sector stays `FULL` forever. On
-remount, GC is retried blindly with no knowledge of which entries were already copied,
-potentially creating duplicate `VALID` entries.
-
-**File:** `nvs/nvs.h` and `nvs/nvs.c`
-
-**Action:** First, add the constant to `nvs.h` after `NVS_SECTOR_FULL`:
-```c
-/** Source sector being reclaimed by GC. Bit-flip reachable from FULL. */
-#define NVS_SECTOR_FREEING  (0xFF000000U)
-```
-
-Then in `nvs/nvs.c` — `nvs_gc_resume()` (extracted in Step 10), at the very start before the copy loop:
-```c
-set_sector_state(target_base, NVS_SECTOR_FREEING);
-```
-
-**Test:** Manually set a sector's state to `FREEING`, partially copy one entry to the
-active sector, then call `nvs_mount()`. All keys written before the simulated power loss
-must be readable. The `FREEING` sector must be erased after mount.
-
----
-
 ### Step 11 — Extract `activate_empty_sector_only()` helper
 
 **Fixes:** Structural pre-condition for Step 13
@@ -228,10 +198,9 @@ all-pass result.
 
 | Step | Fixes | File | Test |
 |------|-------|------|------|
-| 10 | Add `NVS_SECTOR_FREEING` and commit before GC copy | `nvs.h` + `nvs.c` | Manual interrupted-GC test passes |
 | 11 | Pre-condition: `activate_empty_sector_only()` helper | `nvs.c` | All existing tests still pass |
 | 12 | Issue D: GC sector-rotation instead of abort | `nvs.c` | `test_issue_D_gc_cannot_relocate` → `[PASS]` |
-| 13 | Mount resumes interrupted GC (`FREEING` detection) | `nvs.c` | See Step 14 |
+| 13 | Mount resumes interrupted GC (`FREEING` detection) | `nvs.c` | See Step 13 |
 | 14 | Interrupted-GC regression test | `tests/test_nvs_issues.c` | New test → `[PASS]` |
 | 15 | Issue G: CRC fallback policy chosen and documented | `nvs.h` | Comment in source |
 | 16 | Issue G: test updated for chosen policy | `tests/test_nvs_issues.c` | `test_issue_G_no_crc_fallback` → `[PASS]` |
