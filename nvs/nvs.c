@@ -316,6 +316,7 @@ static void get_sectors_by_seq_desc(uint8_t *out_indices, uint8_t *out_count)
  *===========================================================================*/
 
 /* Forward declarations */
+static nvs_err_t activate_empty_sector_only(void);
 static int newer_copy_exists(const char *key, uint8_t key_len, uint32_t src_seq);
 
 typedef struct
@@ -397,10 +398,19 @@ static int gc_resume_visitor(uint32_t base, uint32_t off,
         return 0;
     }
 
-    if (g_nvs.write_offset + entry_total_size(kl, dl) > SECTOR_SIZE)
+    uint32_t esz = entry_total_size(kl, dl);
+    if (g_nvs.write_offset + esz > SECTOR_SIZE)
     {
-        c->all_copied = 0;
-        return 1; /* stop — cannot fit, abort GC */
+        /* Active sector is full — mark it FULL and rotate to the next empty sector. */
+        set_sector_state(g_nvs.active_sector_addr, NVS_SECTOR_FULL);
+        nvs_err_t rc = activate_empty_sector_only();
+        if (rc != NVS_OK)
+        {
+            /* No empty sector available — cannot continue GC. */
+            c->all_copied = 0;
+            return 1; /* stop — genuinely out of space */
+        }
+        /* Continue copying to the newly activated sector. */
     }
 
     write_entry_to_active(kl, dl, key_buf, data_buf);
@@ -408,11 +418,97 @@ static int gc_resume_visitor(uint32_t base, uint32_t off,
 }
 
 /**
+ * Check if target sector contains any live entries (not superseded by newer versions).
+ */
+static int target_has_live_entries(uint32_t target_base, uint32_t target_seq)
+{
+    uint32_t off = NVS_SECTOR_HDR_SIZE;
+    while (off < SECTOR_SIZE)
+    {
+        uint8_t  kl, dl;
+        uint32_t crc;
+        uint8_t  st = read_entry_hdr(target_base + off, &kl, &dl, &crc);
+
+        if (st == NVS_ENTRY_WRITING)
+            break;
+        if (kl == 0 || kl > NVS_MAX_KEY_LEN || dl > NVS_MAX_DATA_LEN)
+            break;
+
+        if (st == NVS_ENTRY_VALID)
+        {
+            /* Check if a newer copy exists. */
+            uint8_t key_buf[NVS_MAX_KEY_LEN];
+            DRV_READ(target_base + off + NVS_ENTRY_HDR_SIZE, key_buf, kl);
+            if (!newer_copy_exists((const char *)key_buf, kl, target_seq))
+            {
+                return 1; /* Found a live entry */
+            }
+        }
+
+        off += entry_total_size(kl, dl);
+    }
+    return 0; /* No live entries */
+}
+
+/**
  * Resume GC: copy valid entries from target sector to active sector, then erase.
- * Called after a target sector has been selected and a FREEING marker written.
+ * Called after a target sector has been selected.
  */
 static nvs_err_t nvs_gc_resume(uint32_t target_base, uint32_t target_seq)
 {
+    /* Ensure we have space in the active sector for copying.
+     * If the active sector is full, try to activate an empty sector.
+     * If no empty sector exists, try to erase another FULL sector that
+     * has no live entries. */
+    if (g_nvs.write_offset >= SECTOR_SIZE)
+    {
+        nvs_err_t rc = activate_empty_sector_only();
+        if (rc != NVS_OK)
+        {
+            /* No completely empty sector. Try erasing another FULL sector
+             * that contains only dead entries. */
+            int erased = 0;
+            for (uint8_t i = 0; i < SECTOR_COUNT; i++)
+            {
+                uint32_t base = sector_addr(i);
+                if (base == target_base)
+                    continue;
+
+                uint32_t magic, seq, state;
+                if (!read_sector_hdr(base, &magic, &seq, &state))
+                    continue;
+                if (state != NVS_SECTOR_FULL)
+                    continue;
+
+                /* Check if this FULL sector has only dead entries. */
+                if (!target_has_live_entries(base, seq))
+                {
+                    DRV_ERASE(base);
+                    erased = 1;
+                    break;
+                }
+            }
+
+            if (erased)
+            {
+                rc = activate_empty_sector_only();
+            }
+
+            if (rc != NVS_OK)
+            {
+                /* Still no space. Check if target itself has anything to copy. */
+                if (!target_has_live_entries(target_base, target_seq))
+                {
+                    /* All entries in target are dead. Just erase and return. */
+                    DRV_ERASE(target_base);
+                    return NVS_OK;
+                }
+                /* Target has live entries but nowhere to copy them. */
+                return NVS_ERR_NO_SPACE;
+            }
+        }
+    }
+
     set_sector_state(target_base, NVS_SECTOR_FREEING);
 
     gc_resume_ctx_t ctx = { .target_seq = target_seq, .all_copied = 1 };

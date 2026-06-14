@@ -35,36 +35,6 @@ Results from the latest test run used to drive this plan:
 
 ---
 
-### Step 12 — Allow active-sector rotation in `nvs_gc_resume()` instead of aborting
-
-**Fixes:** Issue D
-
-**Description:** Depends on Step 11. When a live entry cannot fit in the remaining space of the current active
-sector, `nvs_gc_resume()` aborts and returns `NVS_ERR_NO_SPACE`, leaving the source
-sector in `FREEING` state permanently. Space is genuinely reclaimable but GC gives up.
-
-**File:** `nvs/nvs.c` — `nvs_gc_resume()`, inside the capacity-check block
-
-**Action:** Instead of aborting, mark the active sector `FULL` and activate the next
-empty sector using the helper from Step 12:
-```c
-if (g_nvs.write_offset + esz > SECTOR_SIZE)
-{
-    set_sector_state(g_nvs.active_sector_addr, NVS_SECTOR_FULL);
-    nvs_err_t rc = activate_empty_sector_only();
-    if (rc != NVS_OK)
-    {
-        return NVS_ERR_NO_SPACE; /* genuinely out of space */
-    }
-}
-```
-
-**Test:** `test_issue_D_gc_cannot_relocate` in `tests/test_nvs_issues.c` must report
-`[PASS]`. The churn test must run 4000 iterations without hitting `NVS_ERR_NO_SPACE`,
-and `"LIVE"` must remain readable throughout.
-
----
-
 ### Step 13 — Detect and resume `FREEING` sectors in `nvs_mount()`
 
 **Fixes:** Safe recovery from interrupted GC; closes Step 11 verification
@@ -175,8 +145,12 @@ all-pass result.
 
 | Step | Fixes | File | Test |
 |------|-------|------|------|
-| 12 | Issue D: GC sector-rotation instead of abort | `nvs.c` | `test_issue_D_gc_cannot_relocate` → `[PASS]` |
 | 13 | Mount resumes interrupted GC (`FREEING` detection) | `nvs.c` | See Step 13 |
 | 14 | Interrupted-GC regression test | `tests/test_nvs_issues.c` | New test → `[PASS]` |
 | 15 | Issue G: CRC fallback policy chosen and documented | `nvs.h` | Comment in source |
 | 16 | Issue G: test updated for chosen policy | `tests/test_nvs_issues.c` | `test_issue_G_no_crc_fallback` → `[PASS]` |
+
+**Completed (Steps 1-12):**
+- ✅ Step 10: Add NVS_SECTOR_FREEING state transition before GC copy
+- ✅ Step 11: Extract activate_empty_sector_only() helper
+- ✅ Step 12: Allow active-sector rotation in nvs_gc_resume() + intelligent sector erasure when all FULL
