@@ -8,7 +8,8 @@
       "Bash(make clean *)",
       "Bash(make)",
       "Read(//c/Users/George/.claude/projects/c--Users-George-Desktop-workspace-development-nvs/**)",
-      "PowerShell(cmake --version)"
+      "PowerShell(cmake --version)",
+      "Bash(cmake --build build)"
     ]
   }
 }
