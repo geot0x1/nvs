@@ -6,7 +6,8 @@
       "Read(//c/Users/George/Desktop/workspace/development/esp-idf/components/nvs_flash/host_test/**)",
       "Bash(cmake --build . --target ctest)",
       "Bash(make clean *)",
-      "Bash(make)"
+      "Bash(make)",
+      "Read(//c/Users/George/.claude/projects/c--Users-George-Desktop-workspace-development-nvs/**)"
     ]
   }
 }
