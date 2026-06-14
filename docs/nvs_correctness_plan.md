@@ -35,30 +35,6 @@ Results from the latest test run used to drive this plan:
 
 ---
 
-### Step 2 — Bounds-check `data_len` before the stack buffer read in `nvs_read()`
-
-**Fixes:** Issue A
-
-**Description:** `dl2` is read directly from flash and immediately used to size a
-`DRV_READ` into `data_buf[NVS_MAX_DATA_LEN]`. A committed entry with `data_len = 200`
-(possible after flash corruption) silently overflows the 128-byte stack buffer before
-any validation occurs.
-
-**File:** `nvs/nvs.c` — `nvs_read()`, CRC verification block (~line 676)
-
-**Action:** After `read_entry_hdr(...)` in the CRC block, before either buffer is used:
-```c
-if (kl2 > NVS_MAX_KEY_LEN || dl2 > NVS_MAX_DATA_LEN)
-{
-    return NVS_ERR_CRC; /* treat oversized fields as corruption */
-}
-```
-
-**Test:** `tests/test_issue_A.c` must exit with status 0 (overflow intercepted before
-it occurs). The test plants an entry with `data_len = 200` and calls `nvs_read()`.
-
----
-
 ### Step 3 — Bounds-check `key_len` and `data_len` in the `nvs_mount()` scan
 
 **Fixes:** Corrupt-entry crash in mount scan; pre-condition for Step 8
@@ -501,7 +477,6 @@ all-pass result.
 
 | Step | Fixes | File | Test |
 |------|-------|------|------|
-| 2  | Issue A: `nvs_read` stack overflow | `nvs.c` | `test_issue_A.c` exits 0 |
 | 3  | Issue F: `sector_count > 16` crash; add `NVS_MAX_SECTORS` | `nvs.h` + `nvs.c` | `test_issue_F.c` exits 0 |
 | 4  | Header CRC written on format | `nvs.c` | CRC round-trip assertion passes |
 | 5  | Header CRC verified on read | `nvs.c` | Corrupt-header-ignored test passes |
