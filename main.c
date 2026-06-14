@@ -583,13 +583,13 @@ static void test_crc_corruption_detection(void)
     nvs_write(key, &value, sizeof(value));
 
     /*
-     * The entry is at sector 0, offset 12 (right after the 12-byte header).
+     * The entry is at sector 0, offset 16 (right after the 16-byte sector header).
      * Entry layout: [state(1) key_len(1) data_len(1) rsv(1) crc(4) key(4) data(4)]
-     * Data bytes start at offset 12 + 8 + 4 = 24.
+     * Data bytes start at offset 16 + 8 + 4 = 28.
      * Corrupt one byte of the data region.
      */
     uint8_t corrupt = 0x00;
-    flash_write(24, &corrupt, 1);
+    flash_write(28, &corrupt, 1);
 
     uint32_t readback = 0;
     uint8_t  out_len  = 0;
