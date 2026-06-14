@@ -29,7 +29,7 @@
 #define NVS_MAX_SECTORS         (16U)
 
 /** Sector header size in bytes */
-#define NVS_SECTOR_HDR_SIZE     (12U)
+#define NVS_SECTOR_HDR_SIZE     (16U)
 
 /** Entry fixed header size in bytes (state + key_len + data_len + reserved + crc32) */
 #define NVS_ENTRY_HDR_SIZE      (8U)

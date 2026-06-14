@@ -425,7 +425,8 @@ nvs_err_t nvs_mount(const nvs_flash_driver_t *driver)
         driver->read  == NULL ||
         driver->erase_sector == NULL ||
         driver->sector_size == 0 ||
-        driver->sector_count == 0)
+        driver->sector_count == 0 ||
+        driver->sector_count > 16)
     {
         return NVS_ERR_INVALID_ARG;
     }
