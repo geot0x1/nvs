@@ -24,6 +24,7 @@
 /** Size limits */
 #define NVS_MAX_KEY_LEN         (15U)
 #define NVS_MAX_DATA_LEN        (128U)
+#define NVS_MAX_SECTORS         (16U)
 
 /** Sector header size in bytes */
 #define NVS_SECTOR_HDR_SIZE     (12U)
