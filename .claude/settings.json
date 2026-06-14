@@ -10,7 +10,9 @@
       "Read(//c/Users/George/.claude/projects/c--Users-George-Desktop-workspace-development-nvs/**)",
       "PowerShell(cmake --version)",
       "Bash(cmake --build build)",
-      "Bash(./ctest.exe)"
+      "Bash(./ctest.exe)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }
