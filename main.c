@@ -23,6 +23,7 @@ static int g_amb  = 0;
 
 void run_stress_tests(int *pass, int *fail);
 void run_edge_case_tests(int *pass, int *fail);
+void run_esp_idf_parity_tests(int *pass, int *fail);
 
 /* Inline flash simulator for Issue F (255 sectors) */
 #define FF_SECTOR_SIZE   64U
@@ -1536,6 +1537,7 @@ int main(void)
 
     run_stress_tests(&g_pass, &g_fail);
     run_edge_case_tests(&g_pass, &g_fail);
+    run_esp_idf_parity_tests(&g_pass, &g_fail);
 
     int total_failures = g_fail + g_bug;
     printf("\n========================================\n");

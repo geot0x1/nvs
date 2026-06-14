@@ -14,8 +14,10 @@
 2. [Memory Footprint](#2-memory-footprint)
 3. [Portability](#3-portability)
 4. [Testability](#4-testability)
-5. [Summary Table](#5-summary-table)
-6. [Open Audit Items](#6-open-audit-items)
+5. [Architectural Differences](#5-architectural-differences)
+6. [Feature Gap Analysis](#6-feature-gap-analysis)
+7. [Summary Table](#7-summary-table)
+8. [Open Audit Items](#8-open-audit-items)
 
 ---
 
@@ -205,6 +207,8 @@ void (*erase_sector)(uint32_t addr);
 
 **Known portability constraint:** `sector_count` is capped at 16 (`NVS_MAX_SECTORS`). Enforced by a runtime guard at mount.
 
+**Known integration hazard:** The `nvs_flash_driver_t` struct has no `base_address` field. All flash operations are computed as `idx * sector_size` with the offset relative to address 0. In a real embedded system, the NVS partition starts at a non-zero flash address; the HAL driver implementation must bake in the partition offset itself, creating an implicit coupling that is not visible in the interface.
+
 ---
 
 ### 3.2 ESP-IDF NVS
@@ -238,6 +242,7 @@ void (*erase_sector)(uint32_t addr);
 | ESP32 specificity | None | High |
 | Porting effort (new MCU) | ~1–2 hours | ~1–2 days |
 | Max sectors (practical) | 16 (enforced at mount) | Unlimited (heap-backed) |
+| Base address in HAL | No (offset must be embedded in driver) | Yes (partition table supplies it) |
 
 ---
 
@@ -277,6 +282,7 @@ void (*erase_sector)(uint32_t addr);
 - `sector_count > 16` behaviour (rejected at mount)
 - Multiple partitions
 - Namespace isolation (feature not present)
+- GC target selection after sequence number wrap (latent bug — see Open Audit Items)
 
 **Test philosophy:** Issue tests document and reproduce confirmed bugs. A passing issue test means the bug is fixed; a failing one confirms the defect still exists. Tests are specifications.
 
@@ -342,7 +348,61 @@ void (*erase_sector)(uint32_t addr);
 
 ---
 
-## 5. Summary Table
+## 5. Architectural Differences
+
+### 5.1 Storage Layout
+
+**ESP-IDF NVS** uses a fixed 4096-byte page with a 32-byte header followed by a 32-byte **entry bitmap table**, then 126 fixed-size 32-byte entries starting at offset 64. Entry states are stored as 2-bit fields in the bitmap table (not in the entry itself), allowing O(1) free-entry lookup. The page header is 32 bytes and includes a dedicated `CORRUPT` state in addition to the standard progression.
+
+**Custom NVS** uses a configurable sector size (runtime-injected), a 16-byte sector header (magic + seq + state + crc32), and variable-length entries (8-byte header + key + data + alignment padding). Entry state is encoded as a single byte in each entry header. There is no bitmap table; finding the write offset requires walking all entries linearly on every mount and GC cycle.
+
+**Consequence:** The custom NVS approach is more portable (configurable sector size) and uses less RAM (no per-page metadata objects), but does not scale to large sector counts — linear scans become expensive and there is no O(1) free-space lookup.
+
+### 5.2 Entry Format
+
+| Attribute | Custom NVS | ESP-IDF NVS |
+|-----------|-----------|-------------|
+| Entry size | Variable (8B header + key + data) | Fixed 32 bytes per slot |
+| Max key length | 15 bytes | 15 bytes |
+| Max single-entry data | 128 bytes | 8 bytes (inline); larger values span multiple entries |
+| State location | First byte of entry header | 2-bit field in per-page bitmap table |
+| Type tag | None | 1-byte type field (u8, i16, u32, str, blob, etc.) |
+| Namespace field | None | 1-byte namespace ID per entry |
+
+### 5.3 Namespace Support
+
+ESP-IDF NVS stores namespace as a dedicated entry type. The namespace name occupies up to 15 chars of the key field and a 1-byte namespace ID is stored as the value. All subsequent entries reference the namespace by this 1-byte ID. Up to 254 independent namespaces can coexist on one partition.
+
+The custom NVS has no namespace concept. All keys share a flat address space. Multiple independent firmware modules writing the same key name (e.g., `"timeout"`) will silently overwrite each other with no error.
+
+---
+
+## 6. Feature Gap Analysis
+
+The table below distinguishes between intentional omissions (scope decisions) and unintentional gaps (absent without a clear design rationale).
+
+| Feature | ESP-IDF NVS | Custom NVS | Classification |
+|---------|-------------|------------|----------------|
+| Namespaces (up to 254) | Yes | No | Intentional omission |
+| Type system (u8, i32, str, blob, float) | Yes | No (raw binary) | Intentional omission |
+| Handle/open/close/commit API | Yes | No | Intentional omission |
+| Read-only handles | Yes | No | Intentional omission |
+| Iterator API (nvs_entry_find/next) | Yes | No | Intentional omission |
+| nvs_get_stats() | Yes | No | Intentional omission |
+| Large blobs spanning multiple pages (up to 508 KB) | Yes | No (max 128 bytes) | Intentional omission |
+| Encryption (XTS-AES-256) | Yes | No | Intentional omission |
+| CORRUPT page state (diagnostic) | Yes | No (silently skipped) | Intentional omission |
+| Multiple partition support | Yes | No | Intentional omission |
+| Type-mismatch error on read | Yes | No | Intentional omission |
+| Length-query before allocation (NULL out-ptr) | Yes | No | **Unintentional gap** |
+| nvs_format() / factory erase API | Yes | No | **Unintentional gap** |
+| Base address in HAL interface | Yes (partition table) | No (must be baked into driver) | **Unintentional gap** |
+| nvs_get_size() before read | Yes | No | **Unintentional gap** |
+| Thread safety | Full mutex protection | None | **Unintentional gap** (for RTOS use) |
+
+---
+
+## 7. Summary Table
 
 | Dimension | Custom NVS | ESP-IDF NVS |
 |-----------|-----------|-------------|
@@ -359,20 +419,28 @@ void (*erase_sector)(uint32_t addr);
 | **Thread safety** | Not implemented | Full mutex protection |
 | **Porting effort** | ~1–2 hours | ~1–2 days |
 | **Max sectors (practical)** | 16 (enforced) | Unlimited |
+| **Namespaces** | None | Up to 254 |
+| **Type safety** | None (raw binary) | Full type system |
 | **Test coverage** | 115 cases (functional + issue + stress) | 150+ cases, regression-focused |
 | **Confirmed bugs** | **0** (all resolved) | None documented |
 | **CI integration** | No | Yes |
 
 ---
 
-## 6. Open Audit Items
+## 8. Open Audit Items
 
-All previously confirmed bugs (Issues A–H) have been resolved. The following lower-priority items remain open for consideration before any production use:
+All previously confirmed bugs (Issues A–H) have been resolved. The following items remain open for consideration before any production use, including newly identified issues from the 2026-06-14 re-audit:
 
 | Priority | ID | Location | Description | Recommended Fix |
 |----------|----|----------|-------------|-----------------|
+| **High** | I1 | `nvs.c:950` | GC target selection uses raw `seq < lowest_seq` comparison without wrap-aware sort key. After ~4B sector activations, GC could target the newest sector rather than the oldest, destroying the most recent data while leaving stale copies. The read path correctly uses `seq_sort_key()` but GC does not. | Replace `seq < lowest_seq` with `seq_sort_key(seq) < seq_sort_key(lowest_seq)`. Add a regression test that simulates a post-wrap GC cycle. |
+| **High** | I2 | `crc32.c:3–20` | `table_initialized` is a plain `int` with no `volatile` qualifier and no atomic protection. On weakly-ordered architectures (ARM Cortex-M), a compiler or hardware store reorder could allow a thread to read `table_initialized == 1` while the `crc32_table[]` array is still partially written. The NVS lock does not protect this because `crc32_gen()` may be called before the lock is acquired. | Replace the lazy-init table with a compile-time `static const uint32_t crc32_table[256] = { ... }`. This eliminates the race entirely and reduces startup cost. |
+| **Medium** | I3 | `nvs.h` / `nvs_flash_driver_t` | No `base_address` field in the HAL driver struct. All flash addresses are computed as `idx * sector_size` from 0. Every real embedded deployment (where NVS does not start at address 0) must bake the partition offset into the driver implementation, creating implicit coupling that violates the clean HAL design goal. | Add `uint32_t base_address` to `nvs_flash_driver_t`. Update `sector_addr()` to `return driver->base_address + (uint32_t)idx * SECTOR_SIZE`. |
+| **Medium** | I4 | `nvs.c` | No `nvs_format()` public API. To wipe and reinitialize the partition, the caller must call `flash_full_erase()` directly, bypassing the injected driver HAL abstraction. | Add `nvs_err_t nvs_format(void)` that erases all sectors via the injected `erase_sector` driver function and re-initializes the header of the first sector. |
+| **Medium** | I5 | `nvs.c` | No type safety. All values are raw bytes. A firmware update that changes a key's semantic type (e.g., `uint32_t "timeout"` becomes a string `"timeout_ms"`) causes the new firmware to read garbage with `NVS_OK` — there is no type tag to detect the mismatch at runtime. | Add a 1-byte type field to the entry header. Define a minimal type enum (e.g., `NVS_TYPE_RAW`, `NVS_TYPE_U32`, `NVS_TYPE_STR`). Return `NVS_ERR_TYPE_MISMATCH` on type mismatch in `nvs_read()`. |
 | **Medium** | — | `nvs.c` | No thread safety | Add a critical-section wrapper (or document single-threaded constraint explicitly in `nvs.h`) |
 | **Medium** | — | `nvs.c` | No validation of `flash_driver` function pointers at each operation | Guard `NULL` function pointers before each `DRV_*` call |
+| **Low** | I6 | `flash_mem.c:38` | Comment claims `"Set 64KB (65536 bytes) to 0xFF"` but `FLASH_SECTOR_SIZE` is 4096. The implementation is correct; the comment is stale and will mislead anyone cross-referencing actual hardware behavior. | Fix comment to `"Set FLASH_SECTOR_SIZE bytes (4096) to 0xFF"`. |
 | **Low** | — | `nvs.c:700–701` | `sector_count > NVS_MAX_SECTORS` returns `NVS_ERR_INVALID_ARG` at mount — callers may not distinguish this from other invalid-arg errors | Add a dedicated `NVS_ERR_TOO_MANY_SECTORS` error code |
 | **Low** | — | `nvs.c` | Sector header CRC does not cover in-place state transitions (`ACTIVE → FULL → FREEING`) — tolerated by design but undocumented | Add a comment to `read_sector_hdr()` explaining the state-transition tolerance |
 | **Low** | — | `nvs.h` | `NVS_MAX_SECTORS` is 16 — enforced at runtime but no `static_assert` at compile time | Add `static_assert(NVS_MAX_SECTORS <= 16, ...)` where the stack arrays are declared |
