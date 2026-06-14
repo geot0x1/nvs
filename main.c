@@ -113,7 +113,7 @@ static void inst_erase(uint32_t addr)
 /** Build the flash driver struct and call nvs_mount(). */
 static nvs_err_t test_mount_nvs(void)
 {
-    nvs_flash_driver_t drv;
+    nvs_flash_driver_t drv = {0};
     drv.write        = flash_write;
     drv.read         = flash_read;
     drv.erase_sector = flash_erase_sector;

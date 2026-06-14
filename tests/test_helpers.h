@@ -22,7 +22,7 @@
 /** Mount the NVS core against the standard 3-sector RAM simulator. */
 static inline nvs_err_t th_mount(void)
 {
-    nvs_flash_driver_t drv;
+    nvs_flash_driver_t drv = {0};
     drv.write        = flash_write;
     drv.read         = flash_read;
     drv.erase_sector = flash_erase_sector;

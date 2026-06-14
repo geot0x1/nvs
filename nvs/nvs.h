@@ -76,6 +76,18 @@ typedef struct
 
     /** Number of sectors allocated to NVS. */
     uint8_t  sector_count;
+
+    /**
+     * Acquire the NVS lock before a public API call.
+     * Optional — set to NULL for single-threaded use.
+     */
+    void (*lock)(void);
+
+    /**
+     * Release the NVS lock after a public API call.
+     * Optional — set to NULL for single-threaded use.
+     */
+    void (*unlock)(void);
 } nvs_flash_driver_t;
 
 /*===========================================================================

@@ -92,7 +92,7 @@ int main(void)
         ff_write(base + 8, &state, sizeof(state));
     }
 
-    nvs_flash_driver_t drv;
+    nvs_flash_driver_t drv = {0};
     drv.write        = ff_write;
     drv.read         = ff_read;
     drv.erase_sector = ff_erase;

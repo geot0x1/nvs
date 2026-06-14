@@ -67,7 +67,7 @@ int main(void)
 
     flash_full_erase();
 
-    nvs_flash_driver_t drv;
+    nvs_flash_driver_t drv = {0};
     drv.write        = inst_write;
     drv.read         = inst_read;
     drv.erase_sector = inst_erase;
