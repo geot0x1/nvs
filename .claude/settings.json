@@ -3,7 +3,8 @@
     "allow": [
       "Read(//c/Users/George/Desktop/workspace/development/esp-idf/**)",
       "Bash(find \"C:\\\\Users\\\\George\\\\Desktop\\\\workspace\\\\development\\\\esp-idf\\\\components\\\\nvs_flash\\\\host_test\" -name \"*.cpp\" -type f | head -10)",
-      "Read(//c/Users/George/Desktop/workspace/development/esp-idf/components/nvs_flash/host_test/**)"
+      "Read(//c/Users/George/Desktop/workspace/development/esp-idf/components/nvs_flash/host_test/**)",
+      "Bash(cmake --build . --target ctest)"
     ]
   }
 }
