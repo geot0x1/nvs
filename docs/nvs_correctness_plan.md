@@ -35,29 +35,6 @@ Results from the latest test run used to drive this plan:
 
 ---
 
-### Step 11 — Extract `activate_empty_sector_only()` helper
-
-**Fixes:** Structural pre-condition for Step 13
-
-**Description:** Depends on Step 9. `nvs_gc_resume()` needs to activate a new empty sector when the active
-sector fills mid-GC, but it must not call `nvs_gc()` (which would cause infinite
-recursion). Extract the scan-and-format path from `activate_next_sector()` as a
-standalone, no-GC helper.
-
-**File:** `nvs/nvs.c`
-
-**Action:** Create:
-```c
-static nvs_err_t activate_empty_sector_only(void);
-```
-It scans for an erased sector (first word `== 0xFFFFFFFF`) and formats it ACTIVE. It
-must NOT call `nvs_gc()`. Have `activate_next_sector()` call it for its first-pass scan,
-keeping the existing GC fallback in `activate_next_sector()` for the normal write path.
-
-**Test:** All existing passing tests continue to pass unchanged.
-
----
-
 ### Step 12 — Allow active-sector rotation in `nvs_gc_resume()` instead of aborting
 
 **Fixes:** Issue D
@@ -198,7 +175,6 @@ all-pass result.
 
 | Step | Fixes | File | Test |
 |------|-------|------|------|
-| 11 | Pre-condition: `activate_empty_sector_only()` helper | `nvs.c` | All existing tests still pass |
 | 12 | Issue D: GC sector-rotation instead of abort | `nvs.c` | `test_issue_D_gc_cannot_relocate` → `[PASS]` |
 | 13 | Mount resumes interrupted GC (`FREEING` detection) | `nvs.c` | See Step 13 |
 | 14 | Interrupted-GC regression test | `tests/test_nvs_issues.c` | New test → `[PASS]` |

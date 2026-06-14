@@ -407,15 +407,13 @@ static nvs_err_t nvs_gc(void)
  *===========================================================================*/
 
 /**
- * Find an Empty sector, format it as Active, and update the RAM context.
- * If no Empty sector exists, run GC first.
+ * Scan for an erased sector and format it ACTIVE.
+ * Does NOT call nvs_gc(); used by nvs_gc_resume() to avoid recursion.
  *
- * @return NVS_OK on success, NVS_ERR_NO_SPACE if all sectors are in use
- *         and GC could not free one.
+ * @return NVS_OK if an empty sector was found and activated, NVS_ERR_NO_SPACE otherwise.
  */
-static nvs_err_t activate_next_sector(void)
+static nvs_err_t activate_empty_sector_only(void)
 {
-    /* First pass: look for an already-empty sector. */
     for (uint8_t i = 0; i < SECTOR_COUNT; i++)
     {
         uint32_t base = sector_addr(i);
@@ -432,31 +430,34 @@ static nvs_err_t activate_next_sector(void)
         }
     }
 
+    return NVS_ERR_NO_SPACE;
+}
+
+/**
+ * Find an Empty sector, format it as Active, and update the RAM context.
+ * If no Empty sector exists, run GC first.
+ *
+ * @return NVS_OK on success, NVS_ERR_NO_SPACE if all sectors are in use
+ *         and GC could not free one.
+ */
+static nvs_err_t activate_next_sector(void)
+{
+    /* First pass: look for an already-empty sector. */
+    nvs_err_t rc = activate_empty_sector_only();
+    if (rc == NVS_OK)
+    {
+        return NVS_OK;
+    }
+
     /* No empty sector — try garbage collection. */
-    nvs_err_t rc = nvs_gc();
+    rc = nvs_gc();
     if (rc != NVS_OK)
     {
         return NVS_ERR_NO_SPACE;
     }
 
     /* After GC there should be an empty sector — try again. */
-    for (uint8_t i = 0; i < SECTOR_COUNT; i++)
-    {
-        uint32_t base = sector_addr(i);
-        uint32_t magic_val;
-        DRV_READ(base, &magic_val, sizeof(magic_val));
-
-        if (magic_val == 0xFFFFFFFF)
-        {
-            g_nvs.seq_counter++;
-            write_sector_hdr(base, g_nvs.seq_counter, NVS_SECTOR_ACTIVE);
-            g_nvs.active_sector_addr = base;
-            g_nvs.write_offset       = NVS_SECTOR_HDR_SIZE;
-            return NVS_OK;
-        }
-    }
-
-    return NVS_ERR_NO_SPACE;
+    return activate_empty_sector_only();
 }
 
 /*===========================================================================
