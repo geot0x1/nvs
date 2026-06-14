@@ -146,8 +146,8 @@ static void set_entry_state(uint32_t entry_addr, uint8_t new_state)
  */
 static void get_sectors_by_seq_desc(uint8_t *out_indices, uint8_t *out_count)
 {
-    uint32_t seqs[16];      /* supports up to 16 sectors */
-    uint8_t  valid[16];
+    uint32_t seqs[NVS_MAX_SECTORS];
+    uint8_t  valid[NVS_MAX_SECTORS];
     uint8_t  n = 0;
 
     for (uint8_t i = 0; i < SECTOR_COUNT; i++)
@@ -426,7 +426,7 @@ nvs_err_t nvs_mount(const nvs_flash_driver_t *driver)
         driver->erase_sector == NULL ||
         driver->sector_size == 0 ||
         driver->sector_count == 0 ||
-        driver->sector_count > 16)
+        driver->sector_count > NVS_MAX_SECTORS)
     {
         return NVS_ERR_INVALID_ARG;
     }
@@ -630,7 +630,7 @@ nvs_err_t nvs_read(const char *key, void *buf, uint8_t buf_size, uint8_t *out_le
     }
 
     /* Get sectors ordered by descending sequence number. */
-    uint8_t indices[16];
+    uint8_t indices[NVS_MAX_SECTORS];
     uint8_t count;
     get_sectors_by_seq_desc(indices, &count);
 

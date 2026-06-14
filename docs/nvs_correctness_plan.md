@@ -35,60 +35,6 @@ Results from the latest test run used to drive this plan:
 
 ---
 
-### Step 3 — Bounds-check `key_len` and `data_len` in the `nvs_mount()` scan
-
-**Fixes:** Corrupt-entry crash in mount scan; pre-condition for Step 8
-
-**Description:** `entry_total_size(kl, dl)` is called in the mount scan with values read
-directly from flash. Corrupt values make `esz` arbitrarily large, causing `write_offset`
-to advance past the end of the sector or wrap around, then either crash or silently skip
-valid entries.
-
-**File:** `nvs/nvs.c` — `nvs_mount()`, entry-scan loop (~line 477)
-
-**Action:** After `read_entry_hdr(...)`, add before calling `entry_total_size`:
-```c
-if (kl == 0 || kl > NVS_MAX_KEY_LEN || dl > NVS_MAX_DATA_LEN)
-{
-    break; /* treat corrupt sizes as end of written area */
-}
-```
-
-**Test:** New test in `tests/test_nvs_issues.c` — write one valid entry then plant a
-corrupt entry (`key_len = 0xFF`, `data_len = 0xFF`). After mount, `write_offset` must
-equal the offset of the corrupt entry. No crash, no wrap-around, no skip of the valid entry.
-
----
-
-### Step 3 — Replace `16` array literals with `NVS_MAX_SECTORS` and enforce at mount
-
-**Fixes:** Issue F
-
-**Description:** `get_sectors_by_seq_desc()` declares `seqs[16]` and `valid[16]`.
-`nvs_read()` declares `indices[16]`. When `sector_count > 16` these arrays overflow.
-There is no check that rejects an out-of-range `sector_count` before the overflow occurs.
-
-**File:** `nvs/nvs.c` and `nvs/nvs.h`
-
-**Action:** Add the constant to `nvs.h` alongside the other size limits:
-```c
-#define NVS_MAX_SECTORS     (16U)
-```
-
-Then in `nvs/nvs.c`, replace all three literal `16` array sizes with `NVS_MAX_SECTORS`. In
-`nvs_mount()`, add after the existing null checks:
-```c
-if (driver->sector_count > NVS_MAX_SECTORS)
-{
-    return NVS_ERR_INVALID_ARG;
-}
-```
-
-**Test:** `tests/test_issue_F.c` must exit with status 0 (clean rejection). The test
-calls `nvs_mount()` with `sector_count = 255` and expects `NVS_ERR_INVALID_ARG`.
-
----
-
 ### Step 4 — Write the sector header CRC in `write_sector_hdr()`
 
 **Fixes:** Ensures every newly written header is CRC-protected
@@ -477,7 +423,6 @@ all-pass result.
 
 | Step | Fixes | File | Test |
 |------|-------|------|------|
-| 3  | Issue F: `sector_count > 16` crash; add `NVS_MAX_SECTORS` | `nvs.h` + `nvs.c` | `test_issue_F.c` exits 0 |
 | 4  | Header CRC written on format | `nvs.c` | CRC round-trip assertion passes |
 | 5  | Header CRC verified on read | `nvs.c` | Corrupt-header-ignored test passes |
 | 6  | Issue E: seq_counter poisoning | — (test only) | `test_issue_E_seq_poisoning` → `[PASS]` |
