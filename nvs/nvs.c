@@ -493,7 +493,26 @@ nvs_err_t nvs_mount(const nvs_flash_driver_t *driver)
 
     if (best_idx < 0)
     {
-        /* No active sector — first-time format. */
+        /* No active sector found. Check if flash is truly blank or has FULL sectors. */
+        int has_full = 0;
+        for (uint8_t i = 0; i < SECTOR_COUNT; i++)
+        {
+            uint32_t magic, seq, state;
+            if (read_sector_hdr(sector_addr(i), &magic, &seq, &state)
+                && state == NVS_SECTOR_FULL)
+            {
+                has_full = 1;
+                break;
+            }
+        }
+
+        if (has_full)
+        {
+            /* Flash is not blank — run GC to reclaim a FULL sector. */
+            return activate_next_sector();
+        }
+
+        /* Truly blank flash — first-time format. */
         g_nvs.seq_counter = 1;
         write_sector_hdr(sector_addr(0), 1, NVS_SECTOR_ACTIVE);
         g_nvs.active_sector_addr = sector_addr(0);

@@ -35,53 +35,6 @@ Results from the latest test run used to drive this plan:
 
 ---
 
-### Step 7 — Detect all-FULL flash in `nvs_mount()` and run GC before formatting
-
-**Fixes:** Issues B1, B2
-
-**Description:** When no ACTIVE sector is found (power loss after the last sector was
-marked FULL but before a new one was activated), the current code formats sector 0
-immediately, destroying all committed data. This fix depends on `read_sector_hdr()`
-reliably rejecting torn headers (Steps 4–5).
-
-**File:** `nvs/nvs.c` — `nvs_mount()`, the `if (best_idx < 0)` branch (~line 459)
-
-**Action:** Before the format path, scan for any FULL sectors. If found, the flash is not
-blank — call `activate_next_sector()` (which runs GC) instead of formatting:
-```c
-if (best_idx < 0)
-{
-    int has_full = 0;
-    for (uint8_t i = 0; i < SECTOR_COUNT; i++)
-    {
-        uint32_t magic, seq, state;
-        if (read_sector_hdr(sector_addr(i), &magic, &seq, &state)
-            && state == NVS_SECTOR_FULL)
-        {
-            has_full = 1;
-            break;
-        }
-    }
-
-    if (has_full)
-    {
-        return activate_next_sector();
-    }
-
-    /* Truly blank flash — first-time format. */
-    g_nvs.seq_counter = 1;
-    write_sector_hdr(sector_addr(0), 1, NVS_SECTOR_ACTIVE);
-    g_nvs.active_sector_addr = sector_addr(0);
-    g_nvs.write_offset       = NVS_SECTOR_HDR_SIZE;
-    return NVS_OK;
-}
-```
-
-**Test:** `test_issue_B1_all_full_remount` and `test_issue_B2_full_no_active` in
-`tests/test_nvs_issues.c` must both report `[PASS]`.
-
----
-
 ### Step 8 — Invalidate torn-write slots during `nvs_mount()` scan
 
 **Fixes:** Issue C
@@ -331,7 +284,6 @@ all-pass result.
 
 | Step | Fixes | File | Test |
 |------|-------|------|------|
-| 7  | Issues B1, B2: all-FULL data loss | `nvs.c` | `test_issue_B1` and `test_issue_B2` → `[PASS]` |
 | 8  | Issue C: torn slot corrupts next write | `nvs.c` | `test_issue_C_torn_residue` → `[PASS]` |
 | 9  | Pre-condition: `nvs_gc_resume()` helper extracted | `nvs.c` | All existing tests still pass |
 | 10 | Add `NVS_SECTOR_FREEING` and commit before GC copy | `nvs.h` + `nvs.c` | Manual interrupted-GC test passes |
