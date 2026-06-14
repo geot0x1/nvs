@@ -5,6 +5,7 @@
 #include "nvs.h"
 #include "crc32.h"
 
+#include <assert.h>
 #include <string.h>
 
 /*===========================================================================
@@ -108,6 +109,8 @@ static nvs_err_t activate_next_sector(void);
 /*===========================================================================
  *  Static private variables
  *===========================================================================*/
+
+static_assert(NVS_MAX_SECTORS <= 16, "NVS_MAX_SECTORS exceeds fixed stack array size");
 
 static nvs_context_t g_nvs;
 
