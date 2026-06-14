@@ -1,8 +1,9 @@
 /*
- * test_nvs_esp_idf_parity.c — ESP-IDF NVS host-test parity suite.
+ * test_nvs_robustness.c — NVS robustness and boundary-condition test suite.
  *
- * Covers scenarios exercised by the ESP-IDF nvs_host_test suite that are not
- * present in the existing functional, issue, edge-case, or stress suites.
+ * Covers scenarios not present in the functional, issue, edge-case, or stress
+ * suites: payload patterns, cross-sector read ordering, GC edge cases, mount
+ * idempotency, and key comparison boundaries.
  *
  * Scenarios:
  *   1.  Single-character key round-trip
@@ -11,7 +12,7 @@
  *   4.  Alternating 0xAA/0x55 payload (classic stuck-bit pattern)
  *   5.  Same key written across three sectors — read returns newest
  *   6.  GC with exactly one live entry — forces copy before erase
- *   7.  Write → GC → remount — pre-GC data survives cold boot
+ *   7.  Write -> GC -> remount — pre-GC data survives cold boot
  *   8.  Tombstone propagation — delete suppresses copies in older sectors after GC
  *   9.  Write-offset recovery after partial sector fill + remount
  *  10.  Repeated mount/unmount without writes — seq_counter must not drift
@@ -38,14 +39,12 @@ static int g_fail = 0;
 /*===========================================================================
  *  1. Single-character key round-trip
  *
- *  ESP-IDF tests exercise minimum-length keys (1 char) explicitly because
- *  the key comparison logic must not confuse a 1-char key with a prefix of
- *  a longer key.
+ *  Key comparison must not confuse a 1-char key with a prefix of a longer key.
  *===========================================================================*/
 
 static void test_single_char_key(void)
 {
-    printf("\n--- Parity 1: single-character key round-trip ---\n");
+    printf("\n--- Robustness 1: single-character key round-trip ---\n");
 
     flash_full_erase();
     th_mount();
@@ -76,12 +75,12 @@ static void test_single_char_key(void)
  *
  *  A payload of all 0x00 bytes is legal.  The CRC over a zero buffer is a
  *  known non-zero value; the implementation must not short-circuit on zero
- *  data (e.g., treating zero-length and all-zeros the same way).
+ *  data.
  *===========================================================================*/
 
 static void test_all_zeros_payload(void)
 {
-    printf("\n--- Parity 2: all-zeros payload ---\n");
+    printf("\n--- Robustness 2: all-zeros payload ---\n");
 
     flash_full_erase();
     th_mount();
@@ -112,7 +111,7 @@ static void test_all_zeros_payload(void)
 
 static void test_all_ff_payload(void)
 {
-    printf("\n--- Parity 3: all-0xFF payload (erased flash pattern) ---\n");
+    printf("\n--- Robustness 3: all-0xFF payload (erased flash pattern) ---\n");
 
     flash_full_erase();
     th_mount();
@@ -148,12 +147,12 @@ static void test_all_ff_payload(void)
  *  4. Alternating 0xAA/0x55 payload (stuck-bit pattern)
  *
  *  Classic pattern used in memory tests to catch stuck-at-0 and stuck-at-1
- *  bit faults.  Ensures the CRC and read-back path handle alternating bits.
+ *  bit faults.
  *===========================================================================*/
 
 static void test_alternating_pattern_payload(void)
 {
-    printf("\n--- Parity 4: alternating 0xAA/0x55 payload ---\n");
+    printf("\n--- Robustness 4: alternating 0xAA/0x55 payload ---\n");
 
     flash_full_erase();
     th_mount();
@@ -186,7 +185,7 @@ static void test_alternating_pattern_payload(void)
 
 static void test_same_key_across_three_sectors(void)
 {
-    printf("\n--- Parity 5: same key written across three sectors ---\n");
+    printf("\n--- Robustness 5: same key written across three sectors ---\n");
 
     flash_full_erase();
     th_mount();
@@ -235,12 +234,11 @@ static void test_same_key_across_three_sectors(void)
  *
  *  All entries in the oldest FULL sector are DELETED except one.  GC must
  *  copy that single live entry to the active sector before erasing the source.
- *  The entry must be readable after GC completes.
  *===========================================================================*/
 
 static void test_gc_single_live_entry(void)
 {
-    printf("\n--- Parity 6: GC with exactly one live entry in target sector ---\n");
+    printf("\n--- Robustness 6: GC with exactly one live entry in target sector ---\n");
 
     flash_full_erase();
     th_mount();
@@ -282,7 +280,6 @@ static void test_gc_single_live_entry(void)
     nvs_err_t rc = nvs_write("POST", &post_gc_val, sizeof(post_gc_val));
     P_ASSERT(rc == NVS_OK, "write triggering GC of single-live-entry sector returns NVS_OK");
 
-    /* The lone survivor must have been copied and must still be readable. */
     uint32_t rb = 0;
     uint8_t  ol = 0;
     rc = nvs_read("lone", &rb, sizeof(rb), &ol);
@@ -295,17 +292,15 @@ static void test_gc_single_live_entry(void)
 }
 
 /*===========================================================================
- *  7. Write → GC → remount — pre-GC data survives cold boot
+ *  7. Write -> GC -> remount — pre-GC data survives cold boot
  *
- *  Writes a set of keys, triggers GC (which reclaims a sector), then
- *  simulates a power cycle (remount).  All pre-GC keys must survive.
- *  This is the core scenario tested by ESP-IDF's nvs_host_test for GC
- *  durability across power cycles.
+ *  Writes a set of anchor keys, triggers GC, then simulates a power cycle.
+ *  All pre-GC anchor keys must survive.
  *===========================================================================*/
 
 static void test_write_gc_remount_survival(void)
 {
-    printf("\n--- Parity 7: write -> GC -> remount survival ---\n");
+    printf("\n--- Robustness 7: write -> GC -> remount survival ---\n");
 
     flash_full_erase();
     th_mount();
@@ -372,22 +367,18 @@ static void test_write_gc_remount_survival(void)
  *
  *  Write key "tomb" once in sector 0, once in sector 1 (overwrite), then
  *  delete it.  After a GC cycle and remount, nvs_read must return NOT_FOUND.
- *  The delete tombstone in sector 1 must suppress the older copy in sector 0
- *  even after GC has run and sector ordering may have shifted.
  *===========================================================================*/
 
 static void test_tombstone_propagation(void)
 {
-    printf("\n--- Parity 8: tombstone propagation after GC ---\n");
+    printf("\n--- Robustness 8: tombstone propagation after GC ---\n");
 
     flash_full_erase();
     th_mount();
 
-    /* Write "tomb" into sector 0. */
     uint32_t v1 = 0x11112222U;
     nvs_write("tomb", &v1, sizeof(v1));
 
-    /* Pad sector 0 to near-full. */
     char key[5];
     uint32_t fill_val;
     for (uint32_t i = 0; i < ENTRIES_PER_SECTOR - 1U; i++)
@@ -398,21 +389,17 @@ static void test_tombstone_propagation(void)
         nvs_write(key, &fill_val, sizeof(fill_val));
     }
 
-    /* Overwrite "tomb" in sector 1. */
     uint32_t v2 = 0x33334444U;
     nvs_write("tomb", &v2, sizeof(v2));
 
-    /* Now delete "tomb" — tombstone lives in the active sector (sector 1 or 2). */
     nvs_err_t rc = nvs_delete("tomb");
     P_ASSERT(rc == NVS_OK, "delete 'tomb' returns NVS_OK");
 
-    /* Verify delete is effective immediately. */
     uint32_t rb = 0;
     uint8_t  ol = 0;
     rc = nvs_read("tomb", &rb, sizeof(rb), &ol);
     P_ASSERT(rc == NVS_ERR_NOT_FOUND, "'tomb' is NOT_FOUND immediately after delete");
 
-    /* Fill remaining space to trigger GC, which will process sector 0. */
     for (uint32_t i = 0; i < ENTRIES_PER_SECTOR; i++)
     {
         key[0] = 'G'; key[1] = (char)('0' + i / 100 % 10);
@@ -421,7 +408,6 @@ static void test_tombstone_propagation(void)
         nvs_write(key, &fill_val, sizeof(fill_val));
     }
 
-    /* Simulate remount. */
     th_mount();
 
     rc = nvs_read("tomb", &rb, sizeof(rb), &ol);
@@ -434,20 +420,17 @@ static void test_tombstone_propagation(void)
  *
  *  Write N entries (not a full sector), remount, then write one more entry.
  *  The new entry must be appended after the existing ones, not written on top
- *  of them.  Verify all N+1 entries are readable with correct values.
- *
- *  This catches the class of bug where nvs_mount resets write_offset to
+ *  of them.  Catches the class of bug where mount resets write_offset to
  *  NVS_SECTOR_HDR_SIZE instead of scanning to find the true end of data.
  *===========================================================================*/
 
 static void test_write_offset_recovery_after_partial_fill(void)
 {
-    printf("\n--- Parity 9: write-offset recovery after partial fill + remount ---\n");
+    printf("\n--- Robustness 9: write-offset recovery after partial fill + remount ---\n");
 
     flash_full_erase();
     th_mount();
 
-    /* Write exactly half a sector's worth of entries. */
     const uint32_t half = ENTRIES_PER_SECTOR / 2U;
     char key[5];
     uint32_t val;
@@ -460,22 +443,18 @@ static void test_write_offset_recovery_after_partial_fill(void)
         nvs_write(key, &val, sizeof(val));
     }
 
-    /* Simulate power cycle. */
     th_mount();
 
-    /* Write one new entry after remount. */
     uint32_t post_val = 0xABCDABCDU;
     nvs_err_t rc = nvs_write("post", &post_val, sizeof(post_val));
     P_ASSERT(rc == NVS_OK, "write after partial-fill remount returns NVS_OK");
 
-    /* Read back the new entry. */
     uint32_t rb = 0;
     uint8_t  ol = 0;
     rc = nvs_read("post", &rb, sizeof(rb), &ol);
     P_ASSERT(rc == NVS_OK && rb == 0xABCDABCDU,
              "post-remount entry reads back correctly");
 
-    /* Verify a sample of pre-remount entries are untouched. */
     int pre_ok = 1;
     for (uint32_t i = 0; i < half; i += (half / 4U + 1U))
     {
@@ -498,40 +477,33 @@ static void test_write_offset_recovery_after_partial_fill(void)
  *  10. Repeated mount/unmount without writes — seq_counter must not drift
  *
  *  Mount 100 times in succession without writing anything.  The seq_counter
- *  stored in g_nvs must not advance on read-only mounts.  If it drifted, a
- *  subsequent write would allocate a very high sequence number, potentially
- *  confusing read ordering on the next GC.
+ *  must not advance on read-only mounts.
  *===========================================================================*/
 
 static void test_repeated_mount_no_writes(void)
 {
-    printf("\n--- Parity 10: repeated mount/unmount without writes ---\n");
+    printf("\n--- Robustness 10: repeated mount/unmount without writes ---\n");
 
     flash_full_erase();
     th_mount();
 
-    /* Write a sentinel so there is at least one entry. */
     uint32_t sentinel = 0xFACEFACEU;
     nvs_write("sent", &sentinel, sizeof(sentinel));
 
-    /* Read the sequence number from the active sector header after the first mount. */
     uint32_t seq_before = 0;
-    flash_read(4U, &seq_before, sizeof(seq_before)); /* sector 0, offset 4 = seq field */
+    flash_read(4U, &seq_before, sizeof(seq_before)); /* sector 0 seq field at offset 4 */
 
-    /* Mount 100 more times without writing. */
     for (int i = 0; i < 100; i++)
     {
         th_mount();
     }
 
-    /* seq_counter in the active sector header must be unchanged. */
     uint32_t seq_after = 0;
     flash_read(4U, &seq_after, sizeof(seq_after));
 
     P_ASSERT(seq_before == seq_after,
              "seq_counter does not advance across 100 read-only mounts");
 
-    /* Data must still be readable. */
     uint32_t rb = 0;
     uint8_t  ol = 0;
     nvs_err_t rc = nvs_read("sent", &rb, sizeof(rb), &ol);
@@ -540,24 +512,18 @@ static void test_repeated_mount_no_writes(void)
 }
 
 /*===========================================================================
- *  11. Key with all printable ASCII chars in 15-char boundary
- *
- *  ESP-IDF tests boundary conditions on key character sets.  Use a key
- *  that contains digits, uppercase and lowercase letters — all valid —
- *  at the maximum permitted length.
+ *  11. Key with all printable ASCII chars at the 15-char boundary
  *===========================================================================*/
 
 static void test_max_key_all_printable(void)
 {
-    printf("\n--- Parity 11: 15-char key with mixed printable ASCII ---\n");
+    printf("\n--- Robustness 11: 15-char key with mixed printable ASCII ---\n");
 
     flash_full_erase();
     th_mount();
 
-    const char *key = "aB3xY9mK2nP7qRz"; /* 15 chars deliberately chosen from different ranges */
-    /* Trim to exactly 15 chars (above string is 15). */
     char k15[16];
-    memcpy(k15, key, 15);
+    memcpy(k15, "aB3xY9mK2nP7qRz", 15);
     k15[15] = '\0';
 
     uint32_t val = 0x55AA55AAU;
@@ -574,14 +540,13 @@ static void test_max_key_all_printable(void)
 /*===========================================================================
  *  12. Overwrite changes data length — shorter then longer payload
  *
- *  Mimics ESP-IDF's blob-size-change test.  Write 8 bytes, overwrite with
- *  4 bytes, then overwrite again with 16 bytes.  Each read must return the
- *  current payload length and bytes exactly.
+ *  Write 8 bytes, overwrite with 4 bytes, then overwrite again with 16 bytes.
+ *  Each read must return the current payload length and bytes exactly.
  *===========================================================================*/
 
 static void test_overwrite_changes_data_length(void)
 {
-    printf("\n--- Parity 12: overwrite changes data length (8->4->16) ---\n");
+    printf("\n--- Robustness 12: overwrite changes data length (8->4->16) ---\n");
 
     flash_full_erase();
     th_mount();
@@ -603,7 +568,6 @@ static void test_overwrite_changes_data_length(void)
     P_ASSERT(rc == NVS_OK && ol == 8,          "read after 8-byte write reports length 8");
     P_ASSERT(memcmp(rb, payload8, 8) == 0,     "8-byte payload is byte-exact");
 
-    /* Overwrite with 4 bytes (shorter). */
     rc = nvs_write("vary", payload4, sizeof(payload4));
     P_ASSERT(rc == NVS_OK, "overwrite with 4-byte (shorter) payload returns NVS_OK");
 
@@ -613,7 +577,6 @@ static void test_overwrite_changes_data_length(void)
     P_ASSERT(rc == NVS_OK && ol == 4,          "read after 4-byte overwrite reports length 4");
     P_ASSERT(memcmp(rb, payload4, 4) == 0,     "4-byte payload is byte-exact");
 
-    /* Overwrite with 16 bytes (longer). */
     rc = nvs_write("vary", payload16, sizeof(payload16));
     P_ASSERT(rc == NVS_OK, "overwrite with 16-byte (longer) payload returns NVS_OK");
 
@@ -627,14 +590,13 @@ static void test_overwrite_changes_data_length(void)
 /*===========================================================================
  *  13. Read into exact-size buffer (no margin) returns NVS_OK
  *
- *  Passing buf_size == stored data length is the tight boundary.
- *  ESP-IDF tests this explicitly to catch off-by-one bugs in the
- *  buffer-size comparison (> vs >=).
+ *  buf_size == stored data length is the tight boundary; catches off-by-one
+ *  bugs in the buffer-size comparison (> vs >=).
  *===========================================================================*/
 
 static void test_read_exact_buffer_size(void)
 {
-    printf("\n--- Parity 13: read into exact-size buffer (no margin) ---\n");
+    printf("\n--- Robustness 13: read into exact-size buffer (no margin) ---\n");
 
     flash_full_erase();
     th_mount();
@@ -646,13 +608,11 @@ static void test_read_exact_buffer_size(void)
     memset(rb, 0, sizeof(rb));
     uint8_t ol = 0;
 
-    /* buf_size == stored length: must succeed. */
     nvs_err_t rc = nvs_read("exact", rb, 7, &ol);
     P_ASSERT(rc == NVS_OK,                     "read with buf_size == data_len returns NVS_OK");
     P_ASSERT(ol == 7,                           "out_len is 7");
     P_ASSERT(memcmp(rb, payload, 7) == 0,       "payload byte-exact with exact-size buffer");
 
-    /* buf_size == stored length - 1: must fail. */
     rc = nvs_read("exact", rb, 6, &ol);
     P_ASSERT(rc == NVS_ERR_INVALID_ARG,         "read with buf_size == data_len-1 returns INVALID_ARG");
 }
@@ -660,13 +620,12 @@ static void test_read_exact_buffer_size(void)
 /*===========================================================================
  *  14. Two keys differing only in last character are independent
  *
- *  Key comparison must be exact; a key that shares a prefix with another
- *  must be treated as a completely different key.
+ *  Key comparison must be exact — a shared prefix must not cause aliasing.
  *===========================================================================*/
 
 static void test_keys_differ_only_in_last_char(void)
 {
-    printf("\n--- Parity 14: keys differing only in last character are independent ---\n");
+    printf("\n--- Robustness 14: keys differing only in last character are independent ---\n");
 
     flash_full_erase();
     th_mount();
@@ -691,7 +650,6 @@ static void test_keys_differ_only_in_last_char(void)
     nvs_read("tempc", &rb, sizeof(rb), &ol);
     P_ASSERT(rb == 0xCCCCCCCCU, "'tempc' reads 0xCCCCCCCC");
 
-    /* Overwrite 'tempb' — others must be unaffected. */
     uint32_t vb2 = 0xDDDDDDDDU;
     nvs_write("tempb", &vb2, sizeof(vb2));
 
@@ -708,27 +666,23 @@ static void test_keys_differ_only_in_last_char(void)
 /*===========================================================================
  *  15. GC preserves write ordering: latest copy always wins after reclaim
  *
- *  A key is written 3 times across sector boundaries so each sector holds
- *  one version.  GC reclaims the oldest sector.  After GC and a remount,
- *  nvs_read must return the absolute latest value, not an intermediate one
- *  that was copied during GC.
+ *  A key is written 3 times across sector boundaries.  After GC and a remount,
+ *  nvs_read must return the absolute latest value.
  *===========================================================================*/
 
 static void test_gc_preserves_write_ordering(void)
 {
-    printf("\n--- Parity 15: GC preserves write ordering across reclaim ---\n");
+    printf("\n--- Robustness 15: GC preserves write ordering across reclaim ---\n");
 
     flash_full_erase();
     th_mount();
 
-    /* v1 written early — lands in sector 0 alongside filler. */
     uint32_t v1 = 1111U;
     nvs_write("order", &v1, sizeof(v1));
 
     char key[5];
     uint32_t fill_val;
 
-    /* Fill most of sector 0 with unique filler. */
     for (uint32_t i = 0; i < ENTRIES_PER_SECTOR - 2U; i++)
     {
         key[0] = 'R'; key[1] = (char)('0' + i / 100 % 10);
@@ -737,19 +691,15 @@ static void test_gc_preserves_write_ordering(void)
         nvs_write(key, &fill_val, sizeof(fill_val));
     }
 
-    /* v2 overwrite — sector 0 still active, lands at end of sector 0. */
     uint32_t v2 = 2222U;
     nvs_write("order", &v2, sizeof(v2));
 
-    /* Force sector transition. */
     fill_val = 0xFFFF;
     nvs_write("pad0", &fill_val, sizeof(fill_val));
 
-    /* v3 overwrite — now in sector 1. */
     uint32_t v3 = 3333U;
     nvs_write("order", &v3, sizeof(v3));
 
-    /* Fill sector 1 to trigger overflow (and possibly GC). */
     for (uint32_t i = 0; i < ENTRIES_PER_SECTOR - 2U; i++)
     {
         key[0] = 'S'; key[1] = (char)('0' + i / 100 % 10);
@@ -758,13 +708,10 @@ static void test_gc_preserves_write_ordering(void)
         nvs_write(key, &fill_val, sizeof(fill_val));
     }
 
-    /* This write may trigger GC. */
     nvs_write("pad1", &fill_val, sizeof(fill_val));
 
-    /* Remount. */
     th_mount();
 
-    /* Must read v3 (3333), never v1 (1111) or v2 (2222). */
     uint32_t rb = 0;
     uint8_t  ol = 0;
     nvs_err_t rc = nvs_read("order", &rb, sizeof(rb), &ol);
@@ -776,10 +723,10 @@ static void test_gc_preserves_write_ordering(void)
  *  Entry point (called from main.c)
  *===========================================================================*/
 
-void run_esp_idf_parity_tests(int *pass, int *fail)
+void run_robustness_tests(int *pass, int *fail)
 {
     printf("\n========================================\n");
-    printf("  NVS ESP-IDF Parity Test Suite\n");
+    printf("  NVS Robustness Test Suite\n");
     printf("========================================\n");
 
     test_single_char_key();
@@ -802,6 +749,6 @@ void run_esp_idf_parity_tests(int *pass, int *fail)
     *fail += g_fail;
 
     printf("\n========================================\n");
-    printf("  ESP-IDF parity suite: %d passed, %d failed\n", g_pass, g_fail);
+    printf("  Robustness suite: %d passed, %d failed\n", g_pass, g_fail);
     printf("========================================\n");
 }

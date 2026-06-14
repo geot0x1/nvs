@@ -11,7 +11,7 @@ set(SOURCES
     main.c
     tests/test_stress.c
     tests/test_edge_cases.c
-    tests/test_nvs_esp_idf_parity.c
+    tests/test_nvs_robustness.c
 )
 
 # Add subdirectories
