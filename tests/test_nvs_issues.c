@@ -402,3 +402,91 @@ static void test_issue_H_undersized_buffer(void)
     }
 }
 
+/*===========================================================================
+ *  Regression test: Interrupted GC resume on remount
+ *===========================================================================*/
+
+static void test_interrupted_gc_resume(void)
+{
+    printf("\n--- Regression test: interrupted GC completes safely on remount ---\n");
+    flash_full_erase();
+    th_mount();
+
+    /* Scenario: Fill sector 0 completely, then write to sector 1.
+     * Simulate power loss mid-GC by setting sector 0 to FREEING and manually
+     * copying only one entry to sector 1. */
+
+    uint32_t val_a = 0xAAAA, val_b = 0xBBBB, val_c = 0xCCCC, val_d = 0xDDDD;
+    nvs_write("A", &val_a, sizeof(val_a));
+    nvs_write("B", &val_b, sizeof(val_b));
+    nvs_write("C", &val_c, sizeof(val_c));
+
+    /* Mark sector 0 as FULL to trigger new sector activation and GC. */
+    uint32_t full_state = NVS_SECTOR_FULL;
+    flash_write(8, &full_state, sizeof(full_state));
+
+    /* Activate sector 1 by writing a new key. */
+    nvs_write("D", &val_d, sizeof(val_d));
+
+    /* Now manually simulate interrupted GC:
+     * 1. Set sector 0 state to FREEING (as if GC started).
+     * 2. Manually copy only key "A" to sector 1 (partial copy).
+     * 3. Do NOT erase sector 0 yet.
+     * 4. Remount and let nvs_mount detect and resume the FREEING sector. */
+
+    /* Set sector 0 to FREEING. */
+    uint32_t freeing_state = NVS_SECTOR_FREEING;
+    flash_write(8, &freeing_state, sizeof(freeing_state));
+
+    /* Manually craft entry "A" in sector 1 (after the "D" entry).
+     * First, find where in sector 1 the "D" entry ends. */
+    uint32_t sector_1_base = 4096; /* Assuming 4KB sectors, sector 1 starts at 4096 */
+    uint32_t write_off = 16 + 8; /* header + 8-byte "D" entry aligned */
+
+    uint8_t key_a = 1; /* "A" is 1 character */
+    uint32_t entry_size = 8 + 1 + 4; /* header(8) + key(1) + data(4) */
+    entry_size = (entry_size + 3) & ~3U; /* align4 = 16 bytes */
+
+    th_craft_valid_entry(sector_1_base + write_off, "A", 1, &val_a, sizeof(val_a));
+
+    /* Remount: nvs_mount should detect FREEING sector 0 and resume GC. */
+    th_mount();
+
+    /* Verify all four keys are readable with correct values. */
+    uint32_t rb = 0;
+    uint8_t ol = 0;
+
+    nvs_err_t rc_a = nvs_read("A", &rb, sizeof(rb), &ol);
+    int a_ok = (rc_a == NVS_OK && rb == 0xAAAA);
+
+    rb = 0;
+    nvs_err_t rc_b = nvs_read("B", &rb, sizeof(rb), &ol);
+    int b_ok = (rc_b == NVS_OK && rb == 0xBBBB);
+
+    rb = 0;
+    nvs_err_t rc_c = nvs_read("C", &rb, sizeof(rb), &ol);
+    int c_ok = (rc_c == NVS_OK && rb == 0xCCCC);
+
+    rb = 0;
+    nvs_err_t rc_d = nvs_read("D", &rb, sizeof(rb), &ol);
+    int d_ok = (rc_d == NVS_OK && rb == 0xDDDD);
+
+    /* Verify sector 0 is fully erased (GC completed). */
+    uint32_t first_word = 0;
+    flash_read(0, &first_word, sizeof(first_word));
+    int sector_0_erased = (first_word == 0xFFFFFFFF);
+
+    printf("  observed: A=%s B=%s C=%s D=%s sector0_erased=%d\n",
+           a_ok ? "OK" : "FAIL", b_ok ? "OK" : "FAIL", c_ok ? "OK" : "FAIL",
+           d_ok ? "OK" : "FAIL", sector_0_erased);
+
+    if (a_ok && b_ok && c_ok && d_ok && sector_0_erased)
+    {
+        REPORT_PASS("all keys readable after interrupted-GC resume, sector erased");
+    }
+    else
+    {
+        REPORT_FAIL("interrupted GC resume lost data or did not complete sector erase");
+    }
+}
+

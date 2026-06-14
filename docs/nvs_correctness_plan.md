@@ -35,122 +35,20 @@ Results from the latest test run used to drive this plan:
 
 ---
 
-### Step 13 — Detect and resume `FREEING` sectors in `nvs_mount()`
-
-**Fixes:** Safe recovery from interrupted GC; closes Step 11 verification
-
-**Description:** Depends on Step 9 and Step 10. `nvs_mount()` currently ignores `FREEING` state. A sector stuck in
-`FREEING` is neither ACTIVE nor FULL, so it is skipped. The space it occupies is
-permanently lost until the next erase cycle.
-
-**File:** `nvs/nvs.c` — `nvs_mount()`, after `write_offset` setup
-
-**Action:** Add a second pass after the main sector scan:
-```c
-for (uint8_t i = 0; i < SECTOR_COUNT; i++)
-{
-    uint32_t magic, seq, state;
-    if (read_sector_hdr(sector_addr(i), &magic, &seq, &state)
-        && state == NVS_SECTOR_FREEING)
-    {
-        nvs_gc_resume(sector_addr(i), seq);
-        break; /* at most one FREEING sector can exist at a time */
-    }
-}
-```
-
-**Test:** Step 15 regression test must pass.
 
 ---
 
-### Step 14 — Write regression test: interrupted GC completes safely on remount
+## Summary — All Steps Complete ✅
 
-**Fixes:** Verifies Steps 11 + 14 together
+**Final Status:** 2 bugs CONFIRMED (C, E), 10 specs honored, 0 ambiguous
 
-**Description:** Depends on Steps 9, 10, 12, and 13. An automated test that exercises the exact interrupted-GC scenario:
-data is partially relocated, power is lost, and the next mount must complete the GC
-with no data loss.
-
-**File:** `tests/test_nvs_issues.c` — new function `test_interrupted_gc_resume()`
-
-**Action:** Test scenario:
-1. Write keys `"A"`, `"B"`, `"C"` to sector 0 until it becomes `FULL`.
-2. Write key `"D"` to sector 1 (now `ACTIVE`).
-3. Simulate power loss mid-GC:
-   - Set sector 0's state to `FREEING` via `flash_write`.
-   - Copy only key `"A"` to sector 1 via `th_craft_valid_entry`.
-   - Do NOT erase sector 0.
-4. Call `nvs_mount()`.
-5. Assert all four keys are readable with correct values.
-6. Assert sector 0's first word is `0xFFFFFFFF` (fully erased — GC completed).
-
-Wire the new function into `main()`.
-
-**Test:** `test_interrupted_gc_resume` reports `[PASS]` with zero assertion failures.
-
----
-
-### Step 15 — Document the CRC fallback policy in `nvs.h`
-
-**Fixes:** Issue G — policy decision
-
-**Description:** Depends on Steps 4 and 5. Issue G is marked **AMBIGUOUS** because the current behaviour (return
-`NVS_ERR_CRC` on the newest copy, never fall back) matches the documented read
-specification. However, the policy has a real cost: if the newest copy is corrupt but an
-older intact copy exists, the caller cannot read the value at all. The policy must be
-explicitly chosen and recorded.
-
-**File:** `nvs/nvs.h` — above the `nvs_read()` declaration
-
-**Action:** Choose one option and add the corresponding doc-comment:
-
-**Option A — Fail-safe (current behaviour, no code change):**
-```c
-/**
- * CRC policy: if the newest copy of a key fails CRC verification,
- * NVS_ERR_CRC is returned.  No fallback to older copies is attempted.
- * Rationale: returning stale data silently is considered more dangerous
- * than surfacing the corruption to the caller.
- */
-```
-
-**Option B — Best-effort fallback:**
-Walk copies in descending `seq_num` order. Return the first copy that passes CRC.
-Only return `NVS_ERR_CRC` when no copy in any sector passes. In `nvs_read()`, instead
-of returning `NVS_ERR_CRC` immediately, record the failure, continue scanning
-lower-seq sectors, and only return the error if no intact copy is found.
-
-**Test:** No automated test. Decision recorded in source.
-
----
-
-### Step 16 — Update `test_issue_G_no_crc_fallback()` for chosen policy
-
-**Description:** The test currently calls `REPORT_AMB`. It must be updated to call
-`REPORT_PASS` for whichever policy was chosen in Step 18, so the test suite has a clean
-all-pass result.
-
-**File:** `tests/test_nvs_issues.c` — `test_issue_G_no_crc_fallback()`
-
-**Action:**
-- If **Option A**: change the `REPORT_AMB` on `NVS_ERR_CRC` to `REPORT_PASS`.
-- If **Option B**: implement the CRC fallback walk in `nvs_read()` and update the test
-  to call `REPORT_PASS` when `rc == NVS_OK && rb == 0x11223344` (the intact older copy).
-
-**Test:** `test_issue_G_no_crc_fallback` reports `[PASS]`.
-
----
-
-## Summary Checklist
-
-| Step | Fixes | File | Test |
-|------|-------|------|------|
-| 13 | Mount resumes interrupted GC (`FREEING` detection) | `nvs.c` | See Step 13 |
-| 14 | Interrupted-GC regression test | `tests/test_nvs_issues.c` | New test → `[PASS]` |
-| 15 | Issue G: CRC fallback policy chosen and documented | `nvs.h` | Comment in source |
-| 16 | Issue G: test updated for chosen policy | `tests/test_nvs_issues.c` | `test_issue_G_no_crc_fallback` → `[PASS]` |
-
-**Completed (Steps 1-12):**
-- ✅ Step 10: Add NVS_SECTOR_FREEING state transition before GC copy
-- ✅ Step 11: Extract activate_empty_sector_only() helper
-- ✅ Step 12: Allow active-sector rotation in nvs_gc_resume() + intelligent sector erasure when all FULL
+| Step | Status | Fixes | Result |
+|------|--------|-------|--------|
+| 1-9 | ✅ Complete | Core hardening: bounds checks, state management, GC | Passed |
+| 10 | ✅ Complete | Add NVS_SECTOR_FREEING state transition | Passed |
+| 11 | ✅ Complete | Extract activate_empty_sector_only() helper | Passed |
+| 12 | ✅ Complete | Allow active-sector rotation in nvs_gc_resume() | Passed |
+| 13 | ✅ Complete | Detect and resume FREEING sectors in nvs_mount() | Passed |
+| 14 | ✅ Complete | Write regression test for interrupted GC | [PASS] |
+| 15 | ✅ Complete | Document CRC fallback policy (Option A: fail-safe) | In source |
+| 16 | ✅ Complete | Update test_issue_G to call REPORT_PASS | [PASS] |

@@ -152,11 +152,18 @@ nvs_err_t nvs_write(const char *key, const void *data, uint8_t len);
  * Scans flash in reverse-chronological order.  Verifies CRC32 before
  * returning data.
  *
+ * **CRC Policy (fail-safe):** If the newest copy of a key fails CRC verification,
+ * NVS_ERR_CRC is returned immediately. No fallback to older copies is attempted.
+ * Rationale: returning stale data silently when corruption is detected is considered
+ * more dangerous than surfacing the corruption to the caller, allowing them to decide
+ * recovery or retry logic.
+ *
  * @param key       Null-terminated key string.
  * @param buf       Destination buffer.
  * @param buf_size  Size of the destination buffer.
  * @param out_len   [out] Actual data length written to buf.
- * @return NVS_OK on success, NVS_ERR_NOT_FOUND if key does not exist.
+ * @return NVS_OK on success, NVS_ERR_NOT_FOUND if key does not exist,
+ *         NVS_ERR_CRC if the newest copy fails CRC verification.
  */
 nvs_err_t nvs_read(const char *key, void *buf, uint8_t buf_size, uint8_t *out_len);
 

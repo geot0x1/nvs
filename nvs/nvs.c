@@ -789,6 +789,19 @@ nvs_err_t nvs_mount(const nvs_flash_driver_t *driver)
     }
 
     g_nvs.write_offset = off;
+
+    /* Detect and resume any FREEING sectors (interrupted GC from power loss). */
+    for (uint8_t i = 0; i < SECTOR_COUNT; i++)
+    {
+        uint32_t magic, seq, state;
+        if (read_sector_hdr(sector_addr(i), &magic, &seq, &state)
+            && state == NVS_SECTOR_FREEING)
+        {
+            nvs_gc_resume(sector_addr(i), seq);
+            break; /* at most one FREEING sector can exist at a time */
+        }
+    }
+
     return NVS_OK;
 }
 

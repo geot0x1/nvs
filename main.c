@@ -1325,7 +1325,7 @@ static void test_issue_G_no_crc_fallback(void)
 
     if (rc == NVS_ERR_CRC)
     {
-        REPORT_AMB("returns NVS_ERR_CRC on newest copy, never falls back to intact older copy (matches documented read spec - fail-safe policy)");
+        REPORT_PASS("returns NVS_ERR_CRC on newest copy, never falls back to intact older copy (fail-safe policy honored)");
     }
     else if (rc == NVS_OK && rb == intact_v)
     {
@@ -1333,7 +1333,7 @@ static void test_issue_G_no_crc_fallback(void)
     }
     else
     {
-        REPORT_AMB("unexpected result reading corrupted-newest / intact-older key");
+        REPORT_FAIL("unexpected result reading corrupted-newest / intact-older key");
     }
 }
 
@@ -1361,6 +1361,80 @@ static void test_issue_H_undersized_buffer(void)
     else
     {
         REPORT_FAIL("undersized read contract violated");
+    }
+}
+
+/*===========================================================================
+ *  Regression test: Interrupted GC resume on remount
+ *===========================================================================*/
+
+static void test_interrupted_gc_resume(void)
+{
+    printf("\n--- Regression test: interrupted GC completes safely on remount ---\n");
+    flash_full_erase();
+    th_mount();
+
+    /* Scenario: Manually craft entries in sector 0 and sector 1 to simulate
+     * an interrupted GC state: sector 0 marked FREEING (was being reclaimed),
+     * with partial entries copied to sector 1. On remount, nvs_mount should
+     * detect the FREEING state and resume the GC, safely erasing sector 0. */
+
+    uint32_t val_a = 0xAAAA, val_b = 0xBBBB, val_c = 0xCCCC;
+
+    /* Craft three entries in sector 0 (empty flash, at byte offset 16 after header). */
+    uint32_t sector_0 = 0;
+    uint32_t seq_0 = 1;
+    th_craft_sector_hdr(sector_0, seq_0, NVS_SECTOR_ACTIVE);
+    th_craft_valid_entry(sector_0 + 16, "A", 1, &val_a, sizeof(val_a));
+    th_craft_valid_entry(sector_0 + 32, "B", 1, &val_b, sizeof(val_b));
+    th_craft_valid_entry(sector_0 + 48, "C", 1, &val_c, sizeof(val_c));
+
+    /* Craft sector 1 header (higher sequence, ACTIVE state). */
+    uint32_t sector_1 = 4096;
+    uint32_t seq_1 = 2;
+    th_craft_sector_hdr(sector_1, seq_1, NVS_SECTOR_ACTIVE);
+
+    /* Craft partial GC state: copy only key "A" to sector 1 at offset 16. */
+    th_craft_valid_entry(sector_1 + 16, "A", 1, &val_a, sizeof(val_a));
+
+    /* Simulate power loss: set sector 0 to FREEING state (as if GC was interrupted). */
+    uint32_t freeing_state = NVS_SECTOR_FREEING;
+    flash_write(sector_0 + 8, &freeing_state, sizeof(freeing_state));
+
+    /* Remount: nvs_mount should detect FREEING sector 0 and resume GC. */
+    th_mount();
+
+    /* Verify all three keys from sector 0 are readable with correct values. */
+    uint32_t rb = 0;
+    uint8_t ol = 0;
+
+    nvs_err_t rc_a = nvs_read("A", &rb, sizeof(rb), &ol);
+    int a_ok = (rc_a == NVS_OK && rb == 0xAAAA);
+
+    rb = 0;
+    nvs_err_t rc_b = nvs_read("B", &rb, sizeof(rb), &ol);
+    int b_ok = (rc_b == NVS_OK && rb == 0xBBBB);
+
+    rb = 0;
+    nvs_err_t rc_c = nvs_read("C", &rb, sizeof(rb), &ol);
+    int c_ok = (rc_c == NVS_OK && rb == 0xCCCC);
+
+    /* Verify sector 0 is fully erased (GC completed). */
+    uint32_t first_word = 0;
+    flash_read(sector_0, &first_word, sizeof(first_word));
+    int sector_0_erased = (first_word == 0xFFFFFFFF);
+
+    printf("  observed: A=%s B=%s C=%s sector0_erased=%d\n",
+           a_ok ? "OK" : "FAIL", b_ok ? "OK" : "FAIL", c_ok ? "OK" : "FAIL",
+           sector_0_erased);
+
+    if (a_ok && b_ok && c_ok && sector_0_erased)
+    {
+        REPORT_PASS("all keys readable after interrupted-GC resume, sector erased");
+    }
+    else
+    {
+        REPORT_FAIL("interrupted GC resume lost data or did not complete sector erase");
     }
 }
 
@@ -1447,6 +1521,7 @@ int main(void)
     test_issue_E_seq_poisoning();
     test_issue_G_no_crc_fallback();
     test_issue_H_undersized_buffer();
+    test_interrupted_gc_resume();
     test_issue_A();
     test_issue_F();
 
