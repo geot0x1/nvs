@@ -35,50 +35,6 @@ Results from the latest test run used to drive this plan:
 
 ---
 
-### Step 5 — Verify the sector header CRC in `read_sector_hdr()`
-
-**Fixes:** Issue E (seq_counter poisoning), Issue B partial (state corruption). Depends on Step 4
-
-**Description:** `read_sector_hdr()` currently returns true on magic match alone. A torn
-write that landed `magic` but left `seq_num` or `state` at `0xFFFFFFFF` is silently
-accepted, poisoning `seq_counter` and corrupting mount state.
-
-**File:** `nvs/nvs.c` — `read_sector_hdr()` (~line 52)
-
-**Action:** Read all 16 bytes into a single buffer. After the magic check, read the stored
-CRC from bytes 12–15, compute `crc32_gen(buf, 12)`, and return `0` if they differ:
-```c
-static int read_sector_hdr(uint32_t base,
-                           uint32_t *magic,
-                           uint32_t *seq,
-                           uint32_t *state)
-{
-    uint8_t buf[NVS_SECTOR_HDR_SIZE];
-    DRV_READ(base, buf, NVS_SECTOR_HDR_SIZE);
-
-    memcpy(magic, buf + 0, 4);
-    memcpy(seq,   buf + 4, 4);
-    memcpy(state, buf + 8, 4);
-
-    if (*magic != NVS_MAGIC_WORD)
-    {
-        return 0;
-    }
-
-    uint32_t stored_crc;
-    memcpy(&stored_crc, buf + 12, 4);
-    uint32_t calc_crc = crc32_gen(buf, 12);
-
-    return (calc_crc == stored_crc) ? 1 : 0;
-}
-```
-
-**Test:** New test — write key `"k"`, corrupt byte 5 of sector 0's header (inside
-`seq_num`), call `nvs_mount()`. Assert the corrupt sector is not used as ACTIVE and
-`nvs_read("k")` returns either `NVS_OK` or `NVS_ERR_NOT_FOUND` (no crash, no stale value).
-
----
-
 ### Step 6 — Verify Issue E is closed
 
 **Description:** After Steps 7 and 8, a torn zombie sector header must no longer accept a
@@ -390,7 +346,6 @@ all-pass result.
 
 | Step | Fixes | File | Test |
 |------|-------|------|------|
-| 5  | Header CRC verified on read | `nvs.c` | Corrupt-header-ignored test passes |
 | 6  | Issue E: seq_counter poisoning | — (test only) | `test_issue_E_seq_poisoning` → `[PASS]` |
 | 7  | Issues B1, B2: all-FULL data loss | `nvs.c` | `test_issue_B1` and `test_issue_B2` → `[PASS]` |
 | 8  | Issue C: torn slot corrupts next write | `nvs.c` | `test_issue_C_torn_residue` → `[PASS]` |

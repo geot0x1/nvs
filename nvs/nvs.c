@@ -46,18 +46,44 @@ static inline uint32_t entry_total_size(uint8_t key_len, uint8_t data_len)
  *===========================================================================*/
 
 /**
- * Read the three 32-bit fields of a sector header.
- * Returns true if the magic word matches NVS_MAGIC_WORD.
+ * Read a sector header (all 16 bytes) and verify CRC.
+ * Returns 1 if magic matches and either:
+ *   - CRC is valid (fresh header write), OR
+ *   - State is not 0xFF (header was state-transitioned after CRC was written)
+ * Returns 0 if magic doesn't match or header is clearly corrupted.
  */
 static int read_sector_hdr(uint32_t base,
                            uint32_t *magic,
                            uint32_t *seq,
                            uint32_t *state)
 {
-    DRV_READ(base + 0, magic,  sizeof(*magic));
-    DRV_READ(base + 4, seq,    sizeof(*seq));
-    DRV_READ(base + 8, state,  sizeof(*state));
-    return (*magic == NVS_MAGIC_WORD);
+    uint8_t buf[NVS_SECTOR_HDR_SIZE];
+    DRV_READ(base, buf, NVS_SECTOR_HDR_SIZE);
+
+    memcpy(magic, buf + 0, 4);
+    memcpy(seq,   buf + 4, 4);
+    memcpy(state, buf + 8, 4);
+
+    if (*magic != NVS_MAGIC_WORD)
+    {
+        return 0;
+    }
+
+    uint32_t stored_crc;
+    memcpy(&stored_crc, buf + 12, 4);
+    uint32_t calc_crc = crc32_gen(buf, 12);
+
+    if (calc_crc == stored_crc)
+    {
+        return 1; /* Fresh write with valid CRC */
+    }
+
+    if (*state != 0xFFFFFFFFU)
+    {
+        return 1; /* State was transitioned after CRC was written — valid */
+    }
+
+    return 0; /* CRC mismatch on fresh header (torn write) */
 }
 
 /** Write a full sector header (magic + seq + state + CRC). */
