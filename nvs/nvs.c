@@ -532,8 +532,18 @@ nvs_err_t nvs_mount(const nvs_flash_driver_t *driver)
 
         if (st == NVS_ENTRY_WRITING)
         {
-            /* Incomplete write from a power loss — treat as end. */
-            break;
+            /* Torn write from power loss. Validate sizes before invalidating. */
+            if (kl == 0 || kl > NVS_MAX_KEY_LEN || dl > NVS_MAX_DATA_LEN)
+            {
+                break; /* cannot determine extent — rest of sector unusable */
+            }
+
+            /* Plausible sizes: zero the state byte to prevent AND-corruption. */
+            uint8_t del = NVS_ENTRY_DELETED;
+            DRV_WRITE(g_nvs.active_sector_addr + off, &del, 1);
+
+            off += entry_total_size(kl, dl);
+            continue; /* keep scanning; multiple torn slots are possible */
         }
 
         if (kl == 0 || kl > NVS_MAX_KEY_LEN || dl > NVS_MAX_DATA_LEN)
@@ -645,10 +655,14 @@ nvs_err_t nvs_write(const char *key, const void *data, uint8_t len)
                 break;
             }
 
-            /* Skip the entry we just wrote. */
-            if ((base + off) != new_entry_addr &&
-                st == NVS_ENTRY_VALID &&
-                kl == key_len)
+            /* Validate entry sizes. */
+            if (kl == 0 || kl > NVS_MAX_KEY_LEN || dl > NVS_MAX_DATA_LEN)
+            {
+                break;
+            }
+
+            /* Invalidate older copies of the key if this is a VALID entry. */
+            if (st == NVS_ENTRY_VALID && (base + off) != new_entry_addr && kl == key_len)
             {
                 uint8_t flash_key[NVS_MAX_KEY_LEN];
                 DRV_READ(base + off + NVS_ENTRY_HDR_SIZE, flash_key, kl);

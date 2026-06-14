@@ -35,41 +35,6 @@ Results from the latest test run used to drive this plan:
 
 ---
 
-### Step 8 — Invalidate torn-write slots during `nvs_mount()` scan
-
-**Fixes:** Issue C
-
-**Description:** On encountering `NVS_ENTRY_WRITING`, mount currently does a plain
-`break`, leaving `write_offset` at the torn slot. The next `nvs_write` AND's its new data
-into the partially-cleared bits of the torn slot — the entry passes CRC before the write
-but fails on the next read. Depends on the `kl`/`dl` bounds check from Step 3 and Step 2.
-
-**File:** `nvs/nvs.c` — `nvs_mount()`, entry-scan loop (~line 479)
-
-**Action:** Replace the `break` with a validate-and-invalidate path:
-```c
-if (st == NVS_ENTRY_WRITING)
-{
-    if (kl == 0 || kl > NVS_MAX_KEY_LEN || dl > NVS_MAX_DATA_LEN)
-    {
-        break; /* cannot determine extent — rest of sector unusable */
-    }
-
-    /* Plausible sizes: zero the state byte to prevent AND-corruption. */
-    uint8_t del = NVS_ENTRY_DELETED;
-    DRV_WRITE(g_nvs.active_sector_addr + off, &del, 1);
-
-    off += entry_total_size(kl, dl);
-    continue; /* keep scanning; multiple torn slots are possible */
-}
-```
-
-**Test:** `test_issue_C_torn_residue` in `tests/test_nvs_issues.c` must report `[PASS]`.
-The test writes `"vict"` (111), plants a torn slot, remounts, writes `"vict"` (222),
-then reads it back — must return `NVS_OK` and value `222`.
-
----
-
 ### Step 9 — Extract `nvs_gc_resume()` helper from `nvs_gc()`
 
 **Fixes:** Structural pre-condition for Steps 11–14
@@ -284,7 +249,6 @@ all-pass result.
 
 | Step | Fixes | File | Test |
 |------|-------|------|------|
-| 8  | Issue C: torn slot corrupts next write | `nvs.c` | `test_issue_C_torn_residue` → `[PASS]` |
 | 9  | Pre-condition: `nvs_gc_resume()` helper extracted | `nvs.c` | All existing tests still pass |
 | 10 | Add `NVS_SECTOR_FREEING` and commit before GC copy | `nvs.h` + `nvs.c` | Manual interrupted-GC test passes |
 | 11 | Pre-condition: `activate_empty_sector_only()` helper | `nvs.c` | All existing tests still pass |
