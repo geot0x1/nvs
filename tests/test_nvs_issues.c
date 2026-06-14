@@ -16,7 +16,6 @@
 #include "test_helpers.h"
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 static int g_bug = 0;   /* spec violations confirmed */
@@ -403,83 +402,3 @@ static void test_issue_H_undersized_buffer(void)
     }
 }
 
-/*===========================================================================
- *  Crash-issue orchestration (A and F run as separate executables)
- *===========================================================================*/
-
-static void echo_file(const char *path)
-{
-    FILE *f = fopen(path, "r");
-    if (f == NULL)
-    {
-        return;
-    }
-    char line[512];
-    while (fgets(line, sizeof(line), f) != NULL)
-    {
-        printf("    | %s", line);
-    }
-    fclose(f);
-}
-
-static void run_child(const char *label, const char *exe, const char *logname)
-{
-    printf("\n--- %s (child process: %s) ---\n", label, exe);
-    fflush(stdout);
-
-    /* Redirect the child's own output to a log so its fatal stack-overrun
-     * exception cannot disturb this harness's output stream. */
-    char cmd[600];
-    snprintf(cmd, sizeof(cmd), "%s > %s 2>&1", exe, logname);
-    int rc = system(cmd);
-    echo_file(logname);
-    printf("  child exit status = %d\n", rc);
-    if (rc == 0)
-    {
-        /* Child reached its end WITHOUT detecting the oversized access and
-         * WITHOUT crashing. */
-        REPORT_PASS("child completed cleanly (no overflow observed)");
-    }
-    else
-    {
-        /* exit 42  = Issue A driver intercepted the oversized read (clean proof)
-         * non-zero = Issue F smashed its stack canary / aborted.
-         * Either way: a memory-safety violation is CONFIRMED. */
-        REPORT_FAIL("child reported overflow / aborted (memory-safety violation CONFIRMED)");
-    }
-}
-
-/*===========================================================================
- *  Main
- *===========================================================================*/
-
-int main(int argc, char **argv)
-{
-    setbuf(stdout, NULL); /* unbuffered: keep output intact across child aborts */
-
-    printf("========================================\n");
-    printf("  NVS Issue Verification Suite\n");
-    printf("========================================\n");
-
-    test_issue_B1_all_full_remount();
-    test_issue_B2_full_no_active();
-    test_issue_C_torn_residue();
-    test_issue_D_gc_cannot_relocate();
-    test_issue_E_seq_poisoning();
-    test_issue_G_no_crc_fallback();
-    test_issue_H_undersized_buffer();
-
-    /* A and F are crash-type; launch them as children if paths were given. */
-    /* NOTE: launched via system()/cmd.exe -> use a bare name (cwd is searched),
-     * never a "./" prefix which cmd.exe does not understand. */
-    const char *exe_a = (argc > 1) ? argv[1] : ".\\test_issue_A.exe";
-    const char *exe_f = (argc > 2) ? argv[2] : ".\\test_issue_F.exe";
-    run_child("Issue A: oversized length -> stack overflow in nvs_read", exe_a, "child_A.log");
-    run_child("Issue F: sector_count > 16 -> fixed-array stack overflow", exe_f, "child_F.log");
-
-    printf("\n========================================\n");
-    printf("  Summary: %d bug(s) CONFIRMED, %d spec-honored, %d ambiguous\n",
-           g_bug, g_ok, g_amb);
-    printf("========================================\n");
-    return 0;
-}

@@ -1,12 +1,11 @@
 
 #include "flash_mem.h"
 #include "nvs.h"
+#include "test_helpers.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-
-#define TEST_ENTRY_SIZE (16U)
-#define ENTRIES_PER_SECTOR ((FLASH_SECTOR_SIZE - NVS_SECTOR_HDR_SIZE) / TEST_ENTRY_SIZE)
 
 /*===========================================================================
  *  Test helpers
@@ -14,6 +13,9 @@
 
 static int g_pass = 0;
 static int g_fail = 0;
+static int g_bug  = 0;
+static int g_ok   = 0;
+static int g_amb  = 0;
 
 #define TEST_ASSERT(cond, msg)                                 \
     do                                                         \
@@ -29,6 +31,10 @@ static int g_fail = 0;
             g_fail++;                                          \
         }                                                      \
     } while (0)
+
+#define REPORT_FAIL(msg) do { printf("  [FAIL] %s  <-- bug CONFIRMED\n", (msg)); g_bug++; } while (0)
+#define REPORT_PASS(msg) do { printf("  [PASS] %s\n", (msg)); g_ok++; } while (0)
+#define REPORT_AMB(msg)  do { printf("  [AMBIG] %s\n", (msg)); g_amb++; } while (0)
 
 /** Build the flash driver struct and call nvs_mount(). */
 static nvs_err_t test_mount_nvs(void)
@@ -920,11 +926,372 @@ static void test_repeated_gc_cycles(void)
 }
 
 /*===========================================================================
+ *  Issue verification tests
+ *===========================================================================*/
+
+static void echo_file(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (f == NULL)
+    {
+        return;
+    }
+    char line[512];
+    while (fgets(line, sizeof(line), f) != NULL)
+    {
+        printf("    | %s", line);
+    }
+    fclose(f);
+}
+
+static void run_child(const char *label, const char *exe, const char *logname)
+{
+    printf("\n--- %s (child process: %s) ---\n", label, exe);
+    fflush(stdout);
+
+    char cmd[600];
+    snprintf(cmd, sizeof(cmd), "%s > %s 2>&1", exe, logname);
+    int rc = system(cmd);
+    echo_file(logname);
+    printf("  child exit status = %d\n", rc);
+    if (rc == 0)
+    {
+        REPORT_PASS("child completed cleanly (no overflow observed)");
+    }
+    else
+    {
+        REPORT_FAIL("child reported overflow / aborted (memory-safety violation CONFIRMED)");
+    }
+}
+
+static void test_issue_B1_all_full_remount(void)
+{
+    printf("\n--- Issue B1: all sectors FULL -> remount -> write destroys data ---\n");
+    flash_full_erase();
+    th_mount();
+
+    char key[8];
+    uint32_t val;
+    int total = (int)(FLASH_SECTOR_COUNT * ENTRIES_PER_SECTOR);
+    for (int i = 0; i < total; i++)
+    {
+        th_make_key(key, i);
+        val = (uint32_t)i;
+        nvs_write(key, &val, sizeof(val));
+    }
+
+    val = 0xDEAD;
+    nvs_write("OVR", &val, sizeof(val));
+
+    uint32_t rb = 0; uint8_t ol = 0;
+    nvs_err_t rc = nvs_read("A000", &rb, sizeof(rb), &ol);
+    int pre_ok = (rc == NVS_OK && rb == 0);
+
+    th_mount();
+
+    val = 1;
+    nvs_write("NEWKEY", &val, sizeof(val));
+
+    rb = 0;
+    rc = nvs_read("A000", &rb, sizeof(rb), &ol);
+    int survived = (rc == NVS_OK && rb == 0);
+
+    if (!pre_ok)
+    {
+        printf("  [INFO] pre-reboot A000 not readable (rc=%d) - setup issue\n", rc);
+    }
+    if (survived)
+    {
+        REPORT_PASS("committed key 'A000' survives all-FULL remount + write");
+    }
+    else
+    {
+        printf("  observed: post-remount read A000 rc=%d val=%u (expected OK,0)\n", rc, rb);
+        REPORT_FAIL("committed key 'A000' lost/corrupted after all-FULL remount + write");
+    }
+}
+
+static void test_issue_B2_full_no_active(void)
+{
+    printf("\n--- Issue B2: single sector marked FULL w/o successor -> data loss ---\n");
+    flash_full_erase();
+    th_mount();
+
+    uint32_t val = 0xABCD;
+    nvs_write("keep", &val, sizeof(val));
+
+    uint32_t full = NVS_SECTOR_FULL;
+    flash_write(8, &full, sizeof(full));
+
+    th_mount();
+
+    uint32_t v2 = 0x1111;
+    nvs_write("newk", &v2, sizeof(v2));
+
+    uint32_t rb = 0; uint8_t ol = 0;
+    nvs_err_t rk = nvs_read("keep", &rb, sizeof(rb), &ol);
+    int keep_ok = (rk == NVS_OK && rb == 0xABCD);
+
+    uint32_t rb2 = 0;
+    nvs_err_t rn = nvs_read("newk", &rb2, sizeof(rb2), &ol);
+    int newk_ok = (rn == NVS_OK && rb2 == 0x1111);
+
+    printf("  observed: read 'keep' rc=%d val=0x%X ; read 'newk' rc=%d val=0x%X\n",
+           rk, rb, rn, rb2);
+
+    if (keep_ok && newk_ok)
+    {
+        REPORT_PASS("both 'keep' and 'newk' readable after FULL-no-successor remount");
+    }
+    else
+    {
+        REPORT_FAIL("committed data lost/corrupted (mount reformatted a FULL sector with live data)");
+    }
+}
+
+static void test_issue_C_torn_residue(void)
+{
+    printf("\n--- Issue C: torn residue corrupts a subsequent NVS_OK write ---\n");
+    flash_full_erase();
+    th_mount();
+
+    uint32_t v1 = 111;
+    nvs_write("vict", &v1, sizeof(v1));
+
+    uint8_t kl = 7, dl = 8;
+    uint8_t torn[8 + 7 + 8 + 1]; /* align4(8+7+8)=24 */
+    memset(torn, 0xFF, sizeof(torn));
+    torn[0] = 0xFF; torn[1] = kl; torn[2] = dl; torn[3] = 0xFF;
+    uint8_t crcbuf[2 + 7 + 8];
+    crcbuf[0] = kl; crcbuf[1] = dl;
+    memcpy(&crcbuf[2], "tornkey", 7);
+    memset(&crcbuf[9], 0x55, 8);
+    uint32_t c = crc32_gen(crcbuf, sizeof(crcbuf));
+    torn[4] = (uint8_t)c; torn[5] = (uint8_t)(c >> 8);
+    torn[6] = (uint8_t)(c >> 16); torn[7] = (uint8_t)(c >> 24);
+    memcpy(&torn[8], "tornkey", 7);
+    memset(&torn[15], 0x55, 8);
+    flash_write(12 + 16, torn, 24);
+
+    th_mount();
+
+    uint32_t v2 = 222;
+    nvs_err_t wr = nvs_write("vict", &v2, sizeof(v2));
+
+    uint32_t rb = 0; uint8_t ol = 0;
+    nvs_err_t rr = nvs_read("vict", &rb, sizeof(rb), &ol);
+
+    printf("  observed: nvs_write rc=%d ; nvs_read rc=%d val=%u (expected OK,222)\n",
+           wr, rr, rb);
+
+    if (wr == NVS_OK && !(rr == NVS_OK && rb == 222))
+    {
+        REPORT_FAIL("nvs_write returned NVS_OK but value is unreadable/corrupt (CRC/NOT_FOUND)");
+    }
+    else if (wr == NVS_OK && rr == NVS_OK && rb == 222)
+    {
+        REPORT_PASS("value readable after NVS_OK write over torn residue");
+    }
+    else
+    {
+        printf("  [INFO] write itself did not return NVS_OK (rc=%d)\n", wr);
+        REPORT_AMB("write over torn residue did not return NVS_OK");
+    }
+}
+
+static void test_issue_D_gc_cannot_relocate(void)
+{
+    printf("\n--- Issue D: GC fails to reclaim mostly-dead sectors (NO_SPACE) ---\n");
+    flash_full_erase();
+    th_mount();
+
+    uint32_t val = 42;
+    nvs_write("LIVE", &val, sizeof(val));
+
+    nvs_err_t rc = NVS_OK;
+    int first_fail_iter = -1;
+    for (int i = 0; i < 4000; i++)
+    {
+        val = (uint32_t)i;
+        rc = nvs_write("CHURN", &val, sizeof(val));
+        if (rc != NVS_OK)
+        {
+            first_fail_iter = i;
+            break;
+        }
+    }
+
+    uint32_t rb = 0; uint8_t ol = 0;
+    nvs_err_t lr = nvs_read("LIVE", &rb, sizeof(rb), &ol);
+
+    printf("  observed: first failing CHURN write rc=%d at iter %d ; read LIVE rc=%d val=%u\n",
+           rc, first_fail_iter, lr, rb);
+
+    if (first_fail_iter < 0)
+    {
+        REPORT_PASS("churn never hit NO_SPACE - GC reclaimed dead space");
+    }
+    else if (rc == NVS_ERR_NO_SPACE)
+    {
+        REPORT_FAIL("write returned NO_SPACE while 2 sectors are reclaimable (GC could not relocate live 'LIVE')");
+    }
+    else
+    {
+        printf("  [INFO] unexpected failure code rc=%d\n", rc);
+        REPORT_AMB("churn failed with a non-NO_SPACE error");
+    }
+}
+
+static void test_issue_E_seq_poisoning(void)
+{
+    printf("\n--- Issue E: torn sector header poisons seq_counter (wrap to 0) ---\n");
+    flash_full_erase();
+    th_mount();
+
+    uint32_t val = 5;
+    nvs_write("k", &val, sizeof(val));
+
+    uint32_t magic = NVS_MAGIC_WORD;
+    flash_write(FLASH_SECTOR_SIZE + 0, &magic, sizeof(magic));
+
+    th_mount();
+
+    uint32_t rb = 0; uint8_t ol = 0;
+    nvs_read("k", &rb, sizeof(rb), &ol);
+
+    char key[8];
+    for (int i = 0; i < (int)ENTRIES_PER_SECTOR; i++)
+    {
+        th_make_key(key, i);
+        val = (uint32_t)i;
+        nvs_write(key, &val, sizeof(val));
+    }
+    val = 77;
+    nvs_write("next", &val, sizeof(val));
+
+    uint32_t s1_word = 0;
+    flash_read(FLASH_SECTOR_SIZE + 0, &s1_word, sizeof(s1_word));
+    int zombie = (s1_word == NVS_MAGIC_WORD);
+
+    uint32_t s2_magic = 0, s2_seq = 0xDEAD, s2_state = 0;
+    flash_read(2 * FLASH_SECTOR_SIZE + 0, &s2_magic, sizeof(s2_magic));
+    flash_read(2 * FLASH_SECTOR_SIZE + 4, &s2_seq,   sizeof(s2_seq));
+    flash_read(2 * FLASH_SECTOR_SIZE + 8, &s2_state, sizeof(s2_state));
+
+    printf("  observed: sector1 first-word=0x%08X (zombie=%d) ; "
+           "sector2 magic=0x%08X seq=%u state=0x%08X\n",
+           s1_word, zombie, s2_magic, s2_seq, s2_state);
+
+    int poisoned = (s2_magic == NVS_MAGIC_WORD &&
+                    s2_state == NVS_SECTOR_ACTIVE &&
+                    s2_seq == 0);
+
+    if (poisoned)
+    {
+        REPORT_FAIL("seq_counter poisoned: newly activated sector got seq 0 (wrapped) -> read-order inversion risk");
+    }
+    else
+    {
+        REPORT_PASS("newly activated sector kept a monotonic (non-zero) sequence number");
+    }
+
+    flash_full_erase();
+    th_craft_sector_hdr(0 * FLASH_SECTOR_SIZE, 1, NVS_SECTOR_ACTIVE);
+    th_craft_sector_hdr(2 * FLASH_SECTOR_SIZE, 0, NVS_SECTOR_ACTIVE);
+    uint32_t old_v = 111, new_v = 999;
+    th_craft_valid_entry(0 * FLASH_SECTOR_SIZE + NVS_SECTOR_HDR_SIZE, "dup", 3, &old_v, 4);
+    th_craft_valid_entry(2 * FLASH_SECTOR_SIZE + NVS_SECTOR_HDR_SIZE, "dup", 3, &new_v, 4);
+    th_mount();
+    rb = 0;
+    nvs_err_t dr = nvs_read("dup", &rb, sizeof(rb), &ol);
+    printf("  consequence: read 'dup' rc=%d val=%u (newest=999, stale=111)\n", dr, rb);
+    if (dr == NVS_OK && rb == 111)
+    {
+        REPORT_FAIL("read returned STALE value 111: seq-0 sector mis-sorted as oldest (read inversion)");
+    }
+    else if (dr == NVS_OK && rb == 999)
+    {
+        REPORT_PASS("read returned newest value 999 despite seq-0 sector");
+    }
+    else
+    {
+        REPORT_AMB("read of crafted multi-copy key returned an unexpected result");
+    }
+}
+
+static void test_issue_G_no_crc_fallback(void)
+{
+    printf("\n--- Issue G: CRC error on newest copy, no fallback to older intact copy ---\n");
+    flash_full_erase();
+
+    th_craft_sector_hdr(0 * FLASH_SECTOR_SIZE, 1, NVS_SECTOR_ACTIVE);
+    th_craft_sector_hdr(1 * FLASH_SECTOR_SIZE, 2, NVS_SECTOR_ACTIVE);
+
+    uint32_t intact_v = 0x11223344;
+    uint32_t newer_v  = 0x55667788;
+    th_craft_valid_entry(0 * FLASH_SECTOR_SIZE + NVS_SECTOR_HDR_SIZE, "g", 1, &intact_v, 4);
+    th_craft_valid_entry(1 * FLASH_SECTOR_SIZE + NVS_SECTOR_HDR_SIZE, "g", 1, &newer_v, 4);
+
+    uint32_t data_off = 1 * FLASH_SECTOR_SIZE + NVS_SECTOR_HDR_SIZE + NVS_ENTRY_HDR_SIZE + 1;
+    uint8_t clr = 0x00;
+    flash_write(data_off, &clr, 1);
+
+    th_mount();
+
+    uint32_t rb = 0; uint8_t ol = 0;
+    nvs_err_t rc = nvs_read("g", &rb, sizeof(rb), &ol);
+    printf("  observed: read 'g' rc=%d val=0x%X (older intact copy = 0x%X)\n",
+           rc, rb, intact_v);
+
+    if (rc == NVS_ERR_CRC)
+    {
+        REPORT_AMB("returns NVS_ERR_CRC on newest copy, never falls back to intact older copy (matches documented read spec - fail-safe policy)");
+    }
+    else if (rc == NVS_OK && rb == intact_v)
+    {
+        REPORT_PASS("read fell back to the older intact copy");
+    }
+    else
+    {
+        REPORT_AMB("unexpected result reading corrupted-newest / intact-older key");
+    }
+}
+
+static void test_issue_H_undersized_buffer(void)
+{
+    printf("\n--- Issue H: undersized read buffer contract ---\n");
+    flash_full_erase();
+    th_mount();
+
+    uint8_t payload[8];
+    memset(payload, 0xC3, sizeof(payload));
+    nvs_write("h", payload, sizeof(payload));
+
+    uint8_t small[4];
+    uint8_t out_len = 0xAA;
+    nvs_err_t rc = nvs_read("h", small, sizeof(small), &out_len);
+
+    printf("  observed: rc=%d out_len=0x%02X (expected INVALID_ARG, sentinel 0xAA)\n",
+           rc, out_len);
+
+    if (rc == NVS_ERR_INVALID_ARG && out_len == 0xAA)
+    {
+        REPORT_PASS("undersized read returns INVALID_ARG and leaves out_len untouched");
+    }
+    else
+    {
+        REPORT_FAIL("undersized read contract violated");
+    }
+}
+
+/*===========================================================================
  *  Main
  *===========================================================================*/
 
-int main(void)
+int main(int argc, char **argv)
 {
+    setbuf(stdout, NULL);
+
     printf("========================================\n");
     printf("  NVS Module — Test Suite\n");
     printf("========================================\n");
@@ -959,6 +1326,28 @@ int main(void)
 
     printf("\n========================================\n");
     printf("  Results: %d passed, %d failed\n", g_pass, g_fail);
+    printf("========================================\n");
+
+    printf("\n========================================\n");
+    printf("  NVS Issue Verification Suite\n");
+    printf("========================================\n");
+
+    test_issue_B1_all_full_remount();
+    test_issue_B2_full_no_active();
+    test_issue_C_torn_residue();
+    test_issue_D_gc_cannot_relocate();
+    test_issue_E_seq_poisoning();
+    test_issue_G_no_crc_fallback();
+    test_issue_H_undersized_buffer();
+
+    const char *exe_a = (argc > 1) ? argv[1] : ".\\test_issue_A.exe";
+    const char *exe_f = (argc > 2) ? argv[2] : ".\\test_issue_F.exe";
+    run_child("Issue A: oversized length -> stack overflow in nvs_read", exe_a, "child_A.log");
+    run_child("Issue F: sector_count > 16 -> fixed-array stack overflow", exe_f, "child_F.log");
+
+    printf("\n========================================\n");
+    printf("  Issue summary: %d bug(s) CONFIRMED, %d spec-honored, %d ambiguous\n",
+           g_bug, g_ok, g_amb);
     printf("========================================\n");
 
     return g_fail > 0 ? 1 : 0;

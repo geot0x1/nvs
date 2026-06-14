@@ -21,6 +21,7 @@ add_executable(${PROJECT_NAME} ${SOURCES})
 
 # Link libraries
 target_link_libraries(${PROJECT_NAME} PRIVATE flash_mem crc32 nvs)
+target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 
 # Basic compiler options for GCC
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
@@ -28,24 +29,18 @@ if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
 endif()
 
 #============================================================================
-# Issue-verification test suite (additive; does not affect the ctest target)
+# Crash-type issue executables (launched as children by the main test suite)
 #============================================================================
 
-# Orchestrator: runs Issues B, C, D, E, G, H inline and launches A/F children.
-add_executable(test_nvs_issues tests/test_nvs_issues.c)
-target_include_directories(test_nvs_issues PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-target_link_libraries(test_nvs_issues PRIVATE flash_mem crc32 nvs)
-
-# Crash-type Issue A: oversized data_len -> stack overflow in nvs_read.
+# Issue A: oversized data_len -> stack overflow in nvs_read.
 add_executable(test_issue_A tests/test_issue_A.c)
 target_link_libraries(test_issue_A PRIVATE flash_mem crc32 nvs)
 
-# Crash-type Issue F: sector_count > 16 -> fixed-array stack overflow.
+# Issue F: sector_count > 16 -> fixed-array stack overflow.
 add_executable(test_issue_F tests/test_issue_F.c)
 target_link_libraries(test_issue_F PRIVATE crc32 nvs)
 
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
-    target_compile_options(test_nvs_issues PRIVATE -Wall -Wextra -O2 -fstack-protector-all)
-    target_compile_options(test_issue_A   PRIVATE -Wall -Wextra -O2 -fstack-protector-all)
-    target_compile_options(test_issue_F   PRIVATE -Wall -Wextra -O2 -fstack-protector-all)
+    target_compile_options(test_issue_A PRIVATE -Wall -Wextra -O2 -fstack-protector-all)
+    target_compile_options(test_issue_F PRIVATE -Wall -Wextra -O2 -fstack-protector-all)
 endif()
