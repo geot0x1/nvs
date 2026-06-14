@@ -17,6 +17,7 @@
  */
 
 #include "nvs.h"
+#include "nvs_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>

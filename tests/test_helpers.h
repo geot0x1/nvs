@@ -11,6 +11,7 @@
 
 #include "flash_mem.h"
 #include "nvs.h"
+#include "nvs_internal.h"
 #include "crc32.h"
 
 #include <stdint.h>

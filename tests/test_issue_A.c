@@ -24,6 +24,7 @@
 
 #include "flash_mem.h"
 #include "nvs.h"
+#include "nvs_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>

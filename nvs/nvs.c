@@ -3,6 +3,7 @@
  *===========================================================================*/
 
 #include "nvs.h"
+#include "nvs_internal.h"
 #include "crc32.h"
 
 #include <assert.h>
@@ -24,6 +25,15 @@
 /*===========================================================================
  *  Typedefs
  *===========================================================================*/
+
+typedef struct
+{
+    uint32_t           active_sector_addr;
+    uint32_t           write_offset;
+    uint32_t           seq_counter;
+    uint8_t            corrupt_sector_count;
+    nvs_flash_driver_t driver;
+} NvsContext;
 
 /**
  * Callback type for walk_sector_entries().
@@ -107,6 +117,7 @@ static nvs_err_t nvs_gc(void);
 static nvs_err_t activate_empty_sector_only(void);
 static nvs_err_t activate_next_sector(void);
 static nvs_err_t nvs_format_impl(void);
+static nvs_err_t find_key_data_len(const char *key, uint8_t key_len, uint8_t *out_data_len);
 
 /*===========================================================================
  *  Global variables
@@ -118,7 +129,7 @@ static nvs_err_t nvs_format_impl(void);
 
 static_assert(NVS_MAX_SECTORS <= 16, "NVS_MAX_SECTORS exceeds fixed stack array size");
 
-static nvs_context_t g_nvs;
+static NvsContext g_nvs;
 
 /*===========================================================================
  *  Public functions
@@ -143,8 +154,9 @@ nvs_err_t nvs_mount(const nvs_flash_driver_t *driver)
         return NVS_ERR_TOO_MANY_SECTORS;
     }
 
-    g_nvs.driver = *driver;
-    g_nvs.seq_counter = 0;
+    g_nvs.driver              = *driver;
+    g_nvs.seq_counter         = 0;
+    g_nvs.corrupt_sector_count = 0;
 
     NVS_LOCK();
 
@@ -170,6 +182,18 @@ nvs_err_t nvs_mount(const nvs_flash_driver_t *driver)
             {
                 g_nvs.seq_counter = seq;
                 seq_found = 1;
+            }
+        }
+        else
+        {
+            /* read_sector_hdr() returned 0: magic mismatch or bad CRC.
+             * Peek at the first word to distinguish a corrupt sector
+             * (magic present, CRC wrong) from blank flash (0xFFFFFFFF). */
+            uint32_t first_word;
+            DRV_READ(sector_addr(i), &first_word, sizeof(first_word));
+            if (first_word == NVS_MAGIC_WORD)
+            {
+                g_nvs.corrupt_sector_count++;
             }
         }
     }
@@ -335,61 +359,117 @@ nvs_err_t nvs_read(const char *key, void *buf, uint8_t buf_size, uint8_t *out_le
 
     NVS_LOCK();
 
-    nvs_err_t rc = NVS_ERR_NOT_FOUND;
+    uint8_t   data_len;
+    nvs_err_t rc = find_key_data_len(key, key_len, &data_len);
 
-    uint8_t indices[NVS_MAX_SECTORS];
-    uint8_t count;
-    get_sectors_by_seq_desc(indices, &count);
-
-    for (uint8_t s = 0; s < count; s++)
+    if (rc == NVS_OK)
     {
-        uint32_t base = sector_addr(indices[s]);
-
-        find_last_ctx_t ctx = { .key = key, .key_len = key_len,
-                                .match_off = 0, .match_dl = 0, .found = 0 };
-        walk_sector_entries(base, find_last_visitor, &ctx);
-
-        if (!ctx.found)
-        {
-            continue;
-        }
-
-        uint8_t  kl2, dl2;
-        uint32_t stored_crc;
-        read_entry_hdr(base + ctx.match_off, &kl2, &dl2, &stored_crc);
-
-        if (kl2 > NVS_MAX_KEY_LEN || dl2 > NVS_MAX_DATA_LEN)
-        {
-            rc = NVS_ERR_CRC;
-            break;
-        }
-
-        uint8_t key_buf[NVS_MAX_KEY_LEN];
-        uint8_t data_buf[NVS_MAX_DATA_LEN];
-        DRV_READ(base + ctx.match_off + NVS_ENTRY_HDR_SIZE, key_buf, kl2);
-        DRV_READ(base + ctx.match_off + NVS_ENTRY_HDR_SIZE + kl2, data_buf, dl2);
-
-        uint32_t calc_crc = compute_entry_crc(kl2, dl2, key_buf, data_buf);
-        if (calc_crc != stored_crc)
-        {
-            rc = NVS_ERR_CRC;
-            break;
-        }
-
-        if (ctx.match_dl > buf_size)
+        if (data_len > buf_size)
         {
             rc = NVS_ERR_INVALID_ARG;
+        }
+    }
+
+    if (rc == NVS_OK)
+    {
+        uint8_t indices[NVS_MAX_SECTORS];
+        uint8_t count;
+        get_sectors_by_seq_desc(indices, &count);
+
+        rc = NVS_ERR_NOT_FOUND;
+        for (uint8_t s = 0; s < count; s++)
+        {
+            uint32_t base = sector_addr(indices[s]);
+
+            find_last_ctx_t ctx = { .key = key, .key_len = key_len,
+                                    .match_off = 0, .match_dl = 0, .found = 0 };
+            walk_sector_entries(base, find_last_visitor, &ctx);
+
+            if (!ctx.found)
+            {
+                continue;
+            }
+
+            uint8_t  kl2, dl2;
+            uint32_t stored_crc;
+            read_entry_hdr(base + ctx.match_off, &kl2, &dl2, &stored_crc);
+
+            uint8_t key_buf[NVS_MAX_KEY_LEN];
+            uint8_t data_buf[NVS_MAX_DATA_LEN];
+            DRV_READ(base + ctx.match_off + NVS_ENTRY_HDR_SIZE, key_buf, kl2);
+            DRV_READ(base + ctx.match_off + NVS_ENTRY_HDR_SIZE + kl2, data_buf, dl2);
+
+            memcpy(buf, data_buf, ctx.match_dl);
+            *out_len = ctx.match_dl;
+            rc = NVS_OK;
             break;
         }
-
-        memcpy(buf, data_buf, ctx.match_dl);
-        *out_len = ctx.match_dl;
-        rc = NVS_OK;
-        break;
     }
 
     NVS_UNLOCK();
     return rc;
+}
+
+nvs_err_t nvs_get_size(const char *key, uint8_t *out_size)
+{
+    if (key == NULL || out_size == NULL)
+    {
+        return NVS_ERR_INVALID_ARG;
+    }
+    if (!nvs_is_mounted())
+    {
+        return NVS_ERR_INVALID_ARG;
+    }
+
+    uint8_t key_len = (uint8_t)strlen(key);
+    if (key_len == 0 || key_len > NVS_MAX_KEY_LEN)
+    {
+        return NVS_ERR_INVALID_ARG;
+    }
+
+    NVS_LOCK();
+    nvs_err_t rc = find_key_data_len(key, key_len, out_size);
+    NVS_UNLOCK();
+    return rc;
+}
+
+nvs_err_t nvs_get_stats(NvsSectorStats *out_stats)
+{
+    if (out_stats == NULL || !nvs_is_mounted())
+    {
+        return NVS_ERR_INVALID_ARG;
+    }
+
+    NVS_LOCK();
+
+    out_stats->total_sectors   = SECTOR_COUNT;
+    out_stats->corrupt_sectors = g_nvs.corrupt_sector_count;
+
+    uint8_t active = 0;
+    uint8_t free   = 0;
+    for (uint8_t i = 0; i < SECTOR_COUNT; i++)
+    {
+        uint32_t magic, seq, state;
+        if (read_sector_hdr(sector_addr(i), &magic, &seq, &state))
+        {
+            active++;
+        }
+        else
+        {
+            uint32_t first_word;
+            DRV_READ(sector_addr(i), &first_word, sizeof(first_word));
+            if (first_word == 0xFFFFFFFFU)
+            {
+                free++;
+            }
+        }
+    }
+
+    out_stats->active_sectors = active;
+    out_stats->free_sectors   = free;
+
+    NVS_UNLOCK();
+    return NVS_OK;
 }
 
 nvs_err_t nvs_delete(const char *key)
@@ -1024,6 +1104,66 @@ static nvs_err_t activate_next_sector(void)
     }
 
     return activate_empty_sector_only();
+}
+
+/*===========================================================================
+ *  Static local functions — key lookup helper
+ *===========================================================================*/
+
+/**
+ * Locate the newest valid copy of a key across all sectors, verify its CRC,
+ * and write its data length to *out_data_len.
+ *
+ * Shared by nvs_read() and nvs_get_size() to keep the locate+verify logic
+ * in one place.
+ *
+ * Caller must hold the NVS lock.
+ */
+static nvs_err_t find_key_data_len(const char *key, uint8_t key_len,
+                                   uint8_t *out_data_len)
+{
+    uint8_t indices[NVS_MAX_SECTORS];
+    uint8_t count;
+    get_sectors_by_seq_desc(indices, &count);
+
+    for (uint8_t s = 0; s < count; s++)
+    {
+        uint32_t base = sector_addr(indices[s]);
+
+        find_last_ctx_t ctx = { .key = key, .key_len = key_len,
+                                .match_off = 0, .match_dl = 0, .found = 0 };
+        walk_sector_entries(base, find_last_visitor, &ctx);
+
+        if (!ctx.found)
+        {
+            continue;
+        }
+
+        uint8_t  kl2, dl2;
+        uint32_t stored_crc;
+        read_entry_hdr(base + ctx.match_off, &kl2, &dl2, &stored_crc);
+
+        if (kl2 > NVS_MAX_KEY_LEN || dl2 > NVS_MAX_DATA_LEN)
+        {
+            return NVS_ERR_CRC;
+        }
+
+        uint8_t key_buf[NVS_MAX_KEY_LEN];
+        uint8_t data_buf[NVS_MAX_DATA_LEN];
+        DRV_READ(base + ctx.match_off + NVS_ENTRY_HDR_SIZE, key_buf, kl2);
+        DRV_READ(base + ctx.match_off + NVS_ENTRY_HDR_SIZE + kl2, data_buf, dl2);
+
+        uint32_t calc_crc = compute_entry_crc(kl2, dl2, key_buf, data_buf);
+        if (calc_crc != stored_crc)
+        {
+            return NVS_ERR_CRC;
+        }
+
+        *out_data_len = ctx.match_dl;
+        return NVS_OK;
+    }
+
+    return NVS_ERR_NOT_FOUND;
 }
 
 /*===========================================================================

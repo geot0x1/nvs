@@ -31,7 +31,8 @@
       "PowerShell(cd \"C:\\\\Users\\\\George\\\\Desktop\\\\workspace\\\\development\\\\nvs\\\\build\"; .\\\\ctest.exe 2>&1 | Select-String -Pattern \"Results:|Issue summary:|TOTAL:|Stress suite\" | ForEach-Object { $_.Line.Trim\\(\\) })",
       "Bash(cmake --build . --config Release)",
       "PowerShell(cmake --build \"c:\\\\Users\\\\George\\\\Desktop\\\\workspace\\\\development\\\\nvs\\\\build\" 2>&1)",
-      "Read(//c/Users/George/**)"
+      "Read(//c/Users/George/**)",
+      "PowerShell(cmake --build \"c:\\\\Users\\\\George\\\\Desktop\\\\workspace\\\\development\\\\nvs\\\\build\" 2>&1 | Select-String -Pattern \"error:|warning:|Built target\" | ForEach-Object { $_.Line.Trim\\(\\) })"
     ]
   }
 }

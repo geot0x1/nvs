@@ -8,31 +8,14 @@
  *  Constants
  *===========================================================================*/
 
-/** Sector header magic word: "NVS!" in little-endian */
-#define NVS_MAGIC_WORD          (0x4E565321U)
-
-/** Sector states (bit-flip progression: 1 -> 0 only) */
-#define NVS_SECTOR_EMPTY        (0xFFFFFFFFU)
-#define NVS_SECTOR_ACTIVE       (0xFFFFFF00U)
-#define NVS_SECTOR_FULL         (0xFFFF0000U)
-/** Source sector being reclaimed by GC. Bit-flip reachable from FULL. */
-#define NVS_SECTOR_FREEING      (0xFF000000U)
-
-/** Entry states (bit-flip progression: 1 -> 0 only) */
-#define NVS_ENTRY_WRITING       (0xFFU)
-#define NVS_ENTRY_VALID         (0xFEU)
-#define NVS_ENTRY_DELETED       (0x00U)
-
-/** Size limits */
+/** Maximum key length (null terminator not included). */
 #define NVS_MAX_KEY_LEN         (15U)
+
+/** Maximum value payload size in bytes. */
 #define NVS_MAX_DATA_LEN        (128U)
+
+/** Maximum number of flash sectors that can be assigned to NVS. */
 #define NVS_MAX_SECTORS         (16U)
-
-/** Sector header size in bytes */
-#define NVS_SECTOR_HDR_SIZE     (16U)
-
-/** Entry fixed header size in bytes (state + key_len + data_len + reserved + crc32) */
-#define NVS_ENTRY_HDR_SIZE      (8U)
 
 /*===========================================================================
  *  Types
@@ -49,6 +32,15 @@ typedef enum
     NVS_ERR_INVALID_ARG,
     NVS_ERR_TOO_MANY_SECTORS
 } nvs_err_t;
+
+/** Per-partition sector health summary, populated by nvs_get_stats(). */
+typedef struct
+{
+    uint8_t total_sectors;   /**< sector_count from the mounted driver */
+    uint8_t active_sectors;  /**< sectors with a valid header (any state) */
+    uint8_t corrupt_sectors; /**< sectors skipped at mount due to bad CRC */
+    uint8_t free_sectors;    /**< sectors that are fully blank (0xFF) */
+} NvsSectorStats;
 
 /*===========================================================================
  *  Flash driver interface — injected at mount time
@@ -93,47 +85,6 @@ typedef struct
      */
     void (*unlock)(void);
 } nvs_flash_driver_t;
-
-/*===========================================================================
- *  Packed on-flash structures (for documentation; actual I/O uses byte
- *  arrays to avoid compiler alignment pitfalls)
- *===========================================================================*/
-
-/**
- * Sector header layout (16 bytes):
- *
- *   Offset  Field           Size
- *   0x00    magic           4 B   (0x4E565321)
- *   0x04    seq_num         4 B   (monotonically increasing)
- *   0x08    state           4 B   (Empty / Active / Full / Freeing)
- *   0x0C    crc32           4 B   (CRC32 over bytes 0x00–0x0B)
- */
-
-/**
- * Entry layout (8 B fixed header + key + data + padding):
- *
- *   Offset  Field           Size
- *   0x00    state           1 B   (Writing / Valid / Deleted)
- *   0x01    key_len         1 B
- *   0x02    data_len        1 B   (max 128)
- *   0x03    reserved        1 B   (0xFF)
- *   0x04    crc32           4 B   (over key_len + data_len + key + data)
- *   0x08    key[]           key_len B
- *   0x08+K  data[]          data_len B
- *           padding         P B   (0xFF to 4-byte align total)
- */
-
-/*===========================================================================
- *  RAM context
- *===========================================================================*/
-
-typedef struct
-{
-    uint32_t           active_sector_addr;  /**< Base address of active sector  */
-    uint32_t           write_offset;        /**< Next free byte in active sector */
-    uint32_t           seq_counter;         /**< Highest sequence number seen    */
-    nvs_flash_driver_t driver;              /**< Copy of the injected driver     */
-} nvs_context_t;
 
 /*===========================================================================
  *  Public API
@@ -201,5 +152,33 @@ nvs_err_t nvs_delete(const char *key);
  * @return NVS_OK on success, NVS_ERR_INVALID_ARG if the driver is not mounted.
  */
 nvs_err_t nvs_format(void);
+
+/**
+ * @brief Query the stored data length for a key without reading the data.
+ *
+ * Performs the same locate-and-CRC-verify as nvs_read() but writes only the
+ * data length to *out_size, leaving the caller free to allocate an exact-fit
+ * buffer before calling nvs_read().
+ *
+ * @param key       Null-terminated key string.
+ * @param out_size  [out] Stored data length in bytes.
+ * @return NVS_OK on success, NVS_ERR_NOT_FOUND if key does not exist,
+ *         NVS_ERR_CRC if the newest copy fails CRC verification.
+ */
+nvs_err_t nvs_get_size(const char *key, uint8_t *out_size);
+
+/**
+ * @brief Return a snapshot of sector health for the mounted partition.
+ *
+ * corrupt_sectors counts sectors that had a recognisable magic word at mount
+ * time but failed CRC verification — these sectors are inaccessible and their
+ * former contents are lost.  A non-zero value indicates flash degradation or
+ * a torn sector-header write that was never cleaned up.
+ *
+ * @param out_stats  [out] Populated sector health struct.
+ * @return NVS_OK on success, NVS_ERR_INVALID_ARG if out_stats is NULL or
+ *         the driver is not mounted.
+ */
+nvs_err_t nvs_get_stats(NvsSectorStats *out_stats);
 
 #endif /* NVS_H */

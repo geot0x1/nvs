@@ -13,6 +13,8 @@
  *   5. Write after NO_SPACE then delete  — delete enables GC reclaim
  *   6. Overwrite with identical value    — old entry must be invalidated
  *   7. Max key + max data combined entry — largest legal entry must round-trip
+ *   8. nvs_get_size()                   — length query before buffer allocation
+ *   9. nvs_get_stats()                  — sector health summary + corrupt detection
  */
 
 #include "test_helpers.h"
@@ -388,6 +390,116 @@ static void test_max_key_and_data_combined(void)
 }
 
 /*===========================================================================
+ *  8. nvs_get_size() — query stored length without reading data
+ *
+ *  Verifies:
+ *    a) Returns NVS_OK and the correct length for an existing key.
+ *    b) Returns NVS_ERR_NOT_FOUND for a key that does not exist.
+ *    c) Returns NVS_ERR_CRC when the entry's payload has been corrupted.
+ *    d) A buffer allocated using the returned size is accepted by nvs_read().
+ *===========================================================================*/
+
+static void test_nvs_get_size(void)
+{
+    printf("\n--- Edge case 8: nvs_get_size() ---\n");
+
+    flash_full_erase();
+    th_mount();
+
+    uint8_t payload[12] = {0x10,0x20,0x30,0x40,0x50,0x60,
+                           0x70,0x80,0x90,0xA0,0xB0,0xC0};
+    nvs_write("gsz", payload, sizeof(payload));
+
+    /* (a) Correct length returned for existing key. */
+    uint8_t sz = 0;
+    nvs_err_t rc = nvs_get_size("gsz", &sz);
+    EC_ASSERT(rc == NVS_OK,      "nvs_get_size existing key returns NVS_OK");
+    EC_ASSERT(sz == 12,          "nvs_get_size reports correct length (12)");
+
+    /* (b) NOT_FOUND for a key that was never written. */
+    sz = 0xFF;
+    rc = nvs_get_size("nope", &sz);
+    EC_ASSERT(rc == NVS_ERR_NOT_FOUND, "nvs_get_size unknown key returns NOT_FOUND");
+    EC_ASSERT(sz == 0xFF,              "nvs_get_size does not modify out_size on NOT_FOUND");
+
+    /* (d) Buffer sized by nvs_get_size() is accepted by nvs_read(). */
+    uint8_t rb[12];
+    memset(rb, 0, sizeof(rb));
+    uint8_t ol = 0;
+    rc = nvs_get_size("gsz", &sz);
+    EC_ASSERT(rc == NVS_OK, "nvs_get_size pre-read query returns NVS_OK");
+    rc = nvs_read("gsz", rb, sz, &ol);
+    EC_ASSERT(rc == NVS_OK,                     "nvs_read with exact-size buffer from nvs_get_size returns NVS_OK");
+    EC_ASSERT(ol == 12,                          "nvs_read reports correct out_len");
+    EC_ASSERT(memcmp(rb, payload, 12) == 0,      "payload byte-exact after size-queried read");
+
+    /* (c) CRC error propagates from nvs_get_size(). */
+    /* Entry is at NVS_SECTOR_HDR_SIZE; data starts at +NVS_ENTRY_HDR_SIZE+3 (key "gsz"). */
+    uint8_t bad = 0x00;
+    flash_write(NVS_SECTOR_HDR_SIZE + NVS_ENTRY_HDR_SIZE + 3U, &bad, 1);
+    sz = 0xFF;
+    rc = nvs_get_size("gsz", &sz);
+    EC_ASSERT(rc == NVS_ERR_CRC, "nvs_get_size returns NVS_ERR_CRC on corrupted entry");
+    EC_ASSERT(sz == 0xFF,        "nvs_get_size does not modify out_size on CRC error");
+}
+
+/*===========================================================================
+ *  9. nvs_get_stats() — sector health summary
+ *
+ *  Verifies:
+ *    a) After a clean mount: total == FLASH_SECTOR_COUNT, corrupt == 0,
+ *       active + free == total.
+ *    b) After crafting a sector with valid magic but bad CRC and remounting:
+ *       corrupt_sectors == 1.
+ *    c) NULL out_stats returns NVS_ERR_INVALID_ARG.
+ *===========================================================================*/
+
+static void test_nvs_get_stats(void)
+{
+    printf("\n--- Edge case 9: nvs_get_stats() ---\n");
+
+    flash_full_erase();
+    th_mount();
+
+    /* (c) NULL argument. */
+    nvs_err_t rc = nvs_get_stats(NULL);
+    EC_ASSERT(rc == NVS_ERR_INVALID_ARG, "nvs_get_stats(NULL) returns INVALID_ARG");
+
+    /* (a) Clean mount: no corrupt sectors, counts are consistent. */
+    NvsSectorStats stats;
+    rc = nvs_get_stats(&stats);
+    EC_ASSERT(rc == NVS_OK,
+              "nvs_get_stats after clean mount returns NVS_OK");
+    EC_ASSERT(stats.total_sectors == FLASH_SECTOR_COUNT,
+              "total_sectors matches FLASH_SECTOR_COUNT");
+    EC_ASSERT(stats.corrupt_sectors == 0,
+              "corrupt_sectors is 0 after clean mount");
+    EC_ASSERT((uint8_t)(stats.active_sectors + stats.free_sectors + stats.corrupt_sectors) == stats.total_sectors,
+              "active + free + corrupt == total");
+
+    /* (b) Craft a sector with valid magic but a deliberately wrong CRC,
+     * then remount and verify corrupt_sectors increments. */
+    flash_full_erase();
+
+    /* Write magic word only into sector 1 — seq and state remain 0xFF,
+     * CRC will not match, triggering the corrupt-sector path. */
+    uint32_t magic = NVS_MAGIC_WORD;
+    flash_write(FLASH_SECTOR_SIZE, &magic, sizeof(magic));
+
+    th_mount();
+
+    rc = nvs_get_stats(&stats);
+    EC_ASSERT(rc == NVS_OK,
+              "nvs_get_stats after corrupt-sector mount returns NVS_OK");
+    EC_ASSERT(stats.corrupt_sectors == 1,
+              "corrupt_sectors == 1 after one bad-CRC sector detected at mount");
+    EC_ASSERT(stats.total_sectors == FLASH_SECTOR_COUNT,
+              "total_sectors unchanged by corrupt sector");
+    EC_ASSERT((uint8_t)(stats.active_sectors + stats.free_sectors + stats.corrupt_sectors) == stats.total_sectors,
+              "active + free + corrupt == total after corrupt sector");
+}
+
+/*===========================================================================
  *  Entry point (called from main.c)
  *===========================================================================*/
 
@@ -404,6 +516,8 @@ void run_edge_case_tests(int *pass, int *fail)
     test_write_after_no_space_then_delete();
     test_overwrite_identical_value();
     test_max_key_and_data_combined();
+    test_nvs_get_size();
+    test_nvs_get_stats();
 
     *pass += g_pass;
     *fail += g_fail;

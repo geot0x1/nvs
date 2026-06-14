@@ -1,6 +1,6 @@
 # NVS Implementation Comparison: Custom NVS vs. ESP-IDF NVS
 
-**Date:** 2026-06-14
+**Date:** 2026-06-14 (re-audited 2026-06-14)
 **Scope:** Technical audit across robustness, memory footprint, portability, and testability.
 **Implementations compared:**
 - **Custom NVS** — `c:\Users\George\Desktop\workspace\development\nvs`
@@ -36,7 +36,7 @@ The state-byte flip is the sole atomic commit point. Bit-flip-only semantics are
 
 #### CRC Scheme
 
-**Two levels of CRC32**, Ethernet polynomial `0xEDB88320` (`crc32.c:7`), table-driven with lazy init:
+**Two levels of CRC32**, Ethernet polynomial `0xEDB88320` (`crc32.c:7`), table-driven with a compile-time constant table:
 
 1. **Sector header CRC** — over `magic (4B) + seq_num (4B) + state (4B)` (`nvs.c:110`). Stored at bytes 12–15 of the 16-byte header. Written at sector format time; validated on every mount scan (`nvs.c:84–96`). A sector whose header CRC mismatches is silently skipped.
 2. **Entry payload CRC** — over `key_len (1B) + data_len (1B) + key[] + data[]` (`nvs.c:154–172`). Verified on-the-fly at read time (`nvs.c:914–929`) before returning data to the caller.
@@ -64,7 +64,7 @@ The state-byte flip is the sole atomic commit point. Bit-flip-only semantics are
 
 #### Issue Status
 
-All previously documented issues have been resolved or re-classified. Results are confirmed by the test suite as of 2026-06-14 (115 passed, 0 failed):
+All previously documented issues have been resolved or re-classified. Results are confirmed by the test suite as of 2026-06-14 (210 passed, 0 failed):
 
 | ID | Description | Previous Status | Current Status |
 |----|-------------|-----------------|----------------|
@@ -201,7 +201,7 @@ void (*erase_sector)(uint32_t addr);
 
 **ESP32 specificity:** None in core `nvs.c`. `flash_mem.c` is a test-only RAM simulator.
 
-**Thread safety:** Not implemented. Single-threaded use only.
+**Thread safety:** Optional `lock`/`unlock` function pointers in `nvs_flash_driver_t` (`nvs.h:86–94`). Both default to NULL (no-op). The caller supplies mutex acquire/release implementations; the NVS core calls them around every public API call. No built-in RTOS primitives are used.
 
 **Porting effort:** ~1–2 hours to implement three flash ops for a new MCU.
 
@@ -237,7 +237,7 @@ void (*erase_sector)(uint32_t addr);
 |-----------|-----------|-------------|
 | OS / RTOS dependency | None | FreeRTOS + ESP-IDF primitives |
 | Flash abstraction | 3 function pointers | C++ virtual `Partition` class |
-| Thread safety | Not implemented | Full mutex protection |
+| Thread safety | Optional hooks in driver struct; not exercised by tests | Full mutex protection |
 | Heap dependency | None | Required |
 | ESP32 specificity | None | High |
 | Porting effort (new MCU) | ~1–2 hours | ~1–2 days |
@@ -252,7 +252,9 @@ void (*erase_sector)(uint32_t addr);
 
 **Test files:**
 - `main.c` — 27 functional test cases + 11 issue/regression test cases
-- `tests/test_nvs_issues.c` — 9 dedicated bug-reproduction tests (Issues B1, B2, C, D, E, G, H + interrupted GC regression + corrupt entry sizes)
+- `tests/test_nvs_issues.c` — 8 dedicated bug-reproduction tests (Issues B1, B2, C, D, E, G, H + interrupted GC regression)
+- `tests/test_edge_cases.c` — 7 edge-case tests (pre-mount guard, seq wrap, exact boundary, delete-all remount, reclaim after NO_SPACE, identical-value overwrite, max key+data entry)
+- `tests/test_nvs_robustness.c` — 15 robustness tests (payload patterns, cross-sector ordering, GC edge cases, mount idempotency, key comparison boundaries)
 - `tests/test_stress.c` — 3 stress tests (10 000 single-key churn, 10 000 multi-key interleaved, 50 remount cycles × 20 keys)
 
 **Infrastructure:**
@@ -266,31 +268,41 @@ void (*erase_sector)(uint32_t addr);
 - Sector boundary and GC cycles
 - Remount persistence across power-cycle simulation
 - Torn writes (incomplete entries — both entry body and sector header)
-- CRC corruption detection (entry payload corruption)
+- CRC corruption detection (entry payload corruption; all-zeros, all-0xFF, alternating patterns)
 - GC with mid-copy sector spillover (active sector fills during GC)
+- GC with exactly one live entry remaining in the target sector
 - GC resume on remount after power loss during GC (`FREEING` state detection)
 - All-FULL remount recovery
-- Sequence number ordering with wrap-around (seq=0 treated as highest ordinal)
+- Sequence number ordering with wrap-around (seq=0 treated as highest ordinal; genuine UINT32_MAX→0 wrap)
 - Corrupt entry size fields during mount scan
+- Write-offset recovery after partial sector fill + remount
+- API calls before `nvs_mount` (pre-mount guard)
+- Identical-value overwrites (old entry must still be invalidated)
+- Max key length (15 chars) + max data length (128 bytes) combined entry
+- Key comparison at one-character boundary and last-character-only difference
+- Tombstone propagation — deleted keys not resurrected after GC
+- Repeated remounts without writes (seq_counter must not drift)
+- `nvs_format()` — erase and reinitialize all sectors
 - Stress: 10 000 consecutive single-key writes with GC
 - Stress: 10 000 multi-key interleaved writes with periodic reads
 - Stress: 50 remount/write/read cycles with 20 keys
 
 **Scenarios NOT covered:**
-- Thread safety (no synchronization code exists)
+- Thread safety (no synchronization code exists, though `lock`/`unlock` hooks are wired in the driver struct)
 - Flash write/erase failures (no error injection)
 - `sector_count > 16` behaviour (rejected at mount)
 - Multiple partitions
 - Namespace isolation (feature not present)
-- GC target selection after sequence number wrap (latent bug — see Open Audit Items)
 
 **Test philosophy:** Issue tests document and reproduce confirmed bugs. A passing issue test means the bug is fixed; a failing one confirms the defect still exists. Tests are specifications.
 
 **Current test results (2026-06-14):**
 - Functional tests: **95 passed, 0 failed**
 - Issue verification: **0 bugs confirmed, 12 spec-honored, 0 ambiguous**
-- Stress tests: **3 passed, 0 failed**
-- **Total: 115 passed, 0 failed**
+- Edge-case tests: **33 passed, 0 failed**
+- Robustness tests: **62 passed, 0 failed**
+- Stress tests: **8 passed, 0 failed** (across 3 test scenarios)
+- **Total: 210 passed, 0 failed**
 
 ---
 
@@ -334,13 +346,16 @@ void (*erase_sector)(uint32_t addr);
 
 | Attribute | Custom NVS | ESP-IDF NVS |
 |-----------|-----------|-------------|
-| Total test cases | 115 (27 functional + 11 issue + 3 stress) | 150+ |
+| Total test cases | **210** (95 functional + 12 issue + 33 edge-case + 62 robustness + 8 stress) | 150+ |
 | Test framework | None (hand-rolled) | Catch2 |
 | Host-native tests | Yes | Yes |
 | Flash simulator | Yes (RAM-backed) | Yes (fixture-backed) |
 | CI integration | Not configured | Yes (ESP-IDF CI) |
 | GC interruption tested | Yes (`FREEING` state detection + resume) | Yes (FREEING state) |
+| GC single-live-entry edge case | Yes | Not specifically isolated |
 | Power-loss scenarios | Yes (torn writes + GC interruption) | Yes (duplicate entry detection) |
+| Payload pattern coverage | Yes (all-zeros, all-0xFF, alternating 0xAA/0x55) | Not specifically isolated |
+| Seq-counter wrap coverage | Yes (seq=0 as highest ordinal + UINT32_MAX→0) | Not specifically isolated |
 | Thread-safety tests | No | Yes |
 | Multi-partition tests | No | Yes |
 | Bug-reproduction tests | Yes (Issues A–H; all resolved) | No documented regressions |
@@ -393,12 +408,12 @@ The table below distinguishes between intentional omissions (scope decisions) an
 | Encryption (XTS-AES-256) | Yes | No | Intentional omission |
 | CORRUPT page state (diagnostic) | Yes | No (silently skipped) | Intentional omission |
 | Multiple partition support | Yes | No | Intentional omission |
-| Type-mismatch error on read | Yes | No | Intentional omission |
+| Type-mismatch error on read | Yes | No (raw binary; caller owns type discipline) | Intentional omission |
 | Length-query before allocation (NULL out-ptr) | Yes | No | **Unintentional gap** |
-| nvs_format() / factory erase API | Yes | No | **Unintentional gap** |
+| nvs_format() / factory erase API | Yes | Yes (`nvs_format()` — erases all sectors, reinitializes sector 0) | ~~Unintentional gap~~ **Implemented** |
 | Base address in HAL interface | Yes (partition table) | No (driver absorbs offset internally) | Intentional omission |
 | nvs_get_size() before read | Yes | No | **Unintentional gap** |
-| Thread safety | Full mutex protection | None | **Unintentional gap** (for RTOS use) |
+| Thread safety | Full mutex protection | Optional lock/unlock hooks in driver struct (caller supplies RTOS primitives) | **Partially addressed** — hooks present; caller must populate for RTOS use |
 
 ---
 
@@ -416,12 +431,12 @@ The table below distinguishes between intentional omissions (scope decisions) an
 | **Stack (worst case)** | ~300 bytes; hard limit at 16 sectors | Bounded; dynamic allocation |
 | **OS dependency** | None | FreeRTOS + ESP-IDF |
 | **Flash HAL** | 3 function pointers | C++ virtual `Partition` class |
-| **Thread safety** | Not implemented | Full mutex protection |
+| **Thread safety** | Optional lock/unlock hooks in driver struct (no built-in primitives) | Full mutex protection |
 | **Porting effort** | ~1–2 hours | ~1–2 days |
 | **Max sectors (practical)** | 16 (enforced) | Unlimited |
 | **Namespaces** | None | Up to 254 |
-| **Type safety** | None (raw binary) | Full type system |
-| **Test coverage** | 115 cases (functional + issue + stress) | 150+ cases, regression-focused |
+| **Type safety** | None (raw binary; intentional — caller owns type discipline) | Full type system |
+| **Test coverage** | **210 cases** (functional + issue + edge-case + robustness + stress) | 150+ cases, regression-focused |
 | **Confirmed bugs** | **0** (all resolved) | None documented |
 | **CI integration** | No | Yes |
 
@@ -434,12 +449,12 @@ All previously confirmed bugs (Issues A–H) have been resolved. The following i
 | Status | ID | Location | Description | Resolution |
 |--------|----|----------|-------------|------------|
 | **Closed** | I1 | `nvs.c` | GC target selection used raw `seq < lowest_seq` without wrap-aware sort key. | **Fixed** — replaced with `seq_sort_key(seq) < seq_sort_key(lowest_seq)`. |
-| **Closed** | I2 | `crc32.c` | Lazy-init mutable table with no `volatile`/atomic protection — store-ordering hazard on weakly-ordered architectures. | **Fixed** — replaced with compile-time `static const uint32_t crc32_table[256]`. |
+| **Closed** | I2 | `crc32.c` | Lazy-init mutable table with no `volatile`/atomic protection — store-ordering hazard on weakly-ordered architectures. | **Fixed** — replaced with compile-time `static const uint32_t crc32_table[256]` (`crc32.c:7`). |
 | **Closed** | I3 | `nvs_flash_driver_t` | No `base_address` field in HAL struct. | **Design decision** — partition offset is the driver's responsibility; function pointers absorb it internally. |
-| **Closed** | I4 | `nvs.c` | No `nvs_format()` public API. | **Fixed** — `nvs_format()` added; erases all sectors via the injected HAL and re-initializes sector 0. |
+| **Closed** | I4 | `nvs.c` | No `nvs_format()` public API. | **Fixed** — `nvs_format()` added (`nvs.c:434–445`); erases all sectors via the injected HAL and re-initializes sector 0 as ACTIVE with seq=1. |
 | **Closed** | I6 | `flash_mem.c` | Stale `"Set 64KB"` comment; actual size is 4096 bytes. | **Fixed** — comment updated to `"Set FLASH_SECTOR_SIZE bytes (4096) to 0xFF"`. |
 | **Closed** | — | `nvs.c` | `sector_count > NVS_MAX_SECTORS` not distinguishable from other `INVALID_ARG` errors. | **Already present** — `NVS_ERR_TOO_MANY_SECTORS` error code exists and is returned at mount. |
 | **Closed** | — | `nvs.c` | No `static_assert` on `NVS_MAX_SECTORS`. | **Already present** — `static_assert(NVS_MAX_SECTORS <= 16, ...)` at `nvs.c:118`. |
 | **Closed** | — | `nvs.c` | Sector header CRC tolerance of in-place state transitions undocumented. | **Already documented** — block comment in `read_sector_hdr()` explains the deliberate tolerance. |
-| **Open** | I5 | `nvs.c` | No type safety. Raw-byte reads on a key whose type changed by firmware update return garbage with `NVS_OK`. | Add a 1-byte type field to the entry header, a minimal `NVS_TYPE_*` enum, and `NVS_ERR_TYPE_MISMATCH` — **breaking wire-format change; deferred.** |
-| **Closed** | — | `nvs.h` | No thread safety. Single-threaded constraint undocumented in the public header. | **Fixed** — documented in `nvs_flash_driver_t` doc-comment: all API calls must be serialized by the caller unless `lock`/`unlock` hooks are populated. |
+| **Closed** | I5 | `nvs.c` | No type safety. Raw-byte reads on a key whose type changed by firmware update return garbage with `NVS_OK`. | **Design decision** — type safety is intentionally omitted. The NVS stores raw bytes; type discipline is the caller's responsibility. Adding a type tag would be a breaking wire-format change with no benefit for the target use cases. |
+| **Closed** | — | `nvs.h` / `nvs.c` | No thread safety. Single-threaded constraint undocumented in the public header. | **Fixed** — optional `lock`/`unlock` function pointers added to `nvs_flash_driver_t` (`nvs.h:86–94`); `NVS_LOCK()` / `NVS_UNLOCK()` macros call them around every public API body (`nvs.c:21–22`). Documented in header: caller must supply RTOS primitives or serialize externally. |
