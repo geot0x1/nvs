@@ -35,39 +35,6 @@ Results from the latest test run used to drive this plan:
 
 ---
 
-### Step 4 — Write the sector header CRC in `write_sector_hdr()`
-
-**Fixes:** Ensures every newly written header is CRC-protected
-
-**Description:** New sector headers must carry a CRC so that the verifier added in Step 5
-can detect torn writes. This is the write side of the header integrity pair.
-
-**File:** `nvs/nvs.c` — `write_sector_hdr()` (~line 64)
-
-**Action:** After writing the three existing fields, compute CRC32 over the 12-byte body
-and write it at offset `+12`:
-```c
-static void write_sector_hdr(uint32_t base, uint32_t seq, uint32_t state)
-{
-    uint32_t magic = NVS_MAGIC_WORD;
-    DRV_WRITE(base + 0,  &magic, sizeof(magic));
-    DRV_WRITE(base + 4,  &seq,   sizeof(seq));
-    DRV_WRITE(base + 8,  &state, sizeof(state));
-
-    uint8_t body[12];
-    memcpy(body + 0, &magic, 4);
-    memcpy(body + 4, &seq,   4);
-    memcpy(body + 8, &state, 4);
-    uint32_t crc = crc32_gen(body, 12);
-    DRV_WRITE(base + 12, &crc, sizeof(crc));
-}
-```
-
-**Test:** New assertion — format a sector, read back all 16 header bytes, recompute
-CRC32 over bytes 0–11, assert it equals the value at bytes 12–15.
-
----
-
 ### Step 5 — Verify the sector header CRC in `read_sector_hdr()`
 
 **Fixes:** Issue E (seq_counter poisoning), Issue B partial (state corruption). Depends on Step 4
@@ -423,7 +390,6 @@ all-pass result.
 
 | Step | Fixes | File | Test |
 |------|-------|------|------|
-| 4  | Header CRC written on format | `nvs.c` | CRC round-trip assertion passes |
 | 5  | Header CRC verified on read | `nvs.c` | Corrupt-header-ignored test passes |
 | 6  | Issue E: seq_counter poisoning | — (test only) | `test_issue_E_seq_poisoning` → `[PASS]` |
 | 7  | Issues B1, B2: all-FULL data loss | `nvs.c` | `test_issue_B1` and `test_issue_B2` → `[PASS]` |

@@ -60,13 +60,21 @@ static int read_sector_hdr(uint32_t base,
     return (*magic == NVS_MAGIC_WORD);
 }
 
-/** Write a full sector header (magic + seq + state). */
+/** Write a full sector header (magic + seq + state + CRC). */
 static void write_sector_hdr(uint32_t base, uint32_t seq, uint32_t state)
 {
+    uint8_t hdr[NVS_SECTOR_HDR_SIZE];
     uint32_t magic = NVS_MAGIC_WORD;
-    DRV_WRITE(base + 0, &magic, sizeof(magic));
-    DRV_WRITE(base + 4, &seq,   sizeof(seq));
-    DRV_WRITE(base + 8, &state, sizeof(state));
+    uint32_t crc;
+
+    memcpy(hdr + 0,  &magic, 4);
+    memcpy(hdr + 4,  &seq,   4);
+    memcpy(hdr + 8,  &state, 4);
+
+    crc = crc32_gen(hdr, 12);
+    memcpy(hdr + 12, &crc,   4);
+
+    DRV_WRITE(base, hdr, NVS_SECTOR_HDR_SIZE);
 }
 
 /** Transition a sector to a new state (bit-flip only, no erase needed). */
