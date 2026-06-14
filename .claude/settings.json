@@ -32,7 +32,10 @@
       "Bash(cmake --build . --config Release)",
       "PowerShell(cmake --build \"c:\\\\Users\\\\George\\\\Desktop\\\\workspace\\\\development\\\\nvs\\\\build\" 2>&1)",
       "Read(//c/Users/George/**)",
-      "PowerShell(cmake --build \"c:\\\\Users\\\\George\\\\Desktop\\\\workspace\\\\development\\\\nvs\\\\build\" 2>&1 | Select-String -Pattern \"error:|warning:|Built target\" | ForEach-Object { $_.Line.Trim\\(\\) })"
+      "PowerShell(cmake --build \"c:\\\\Users\\\\George\\\\Desktop\\\\workspace\\\\development\\\\nvs\\\\build\" 2>&1 | Select-String -Pattern \"error:|warning:|Built target\" | ForEach-Object { $_.Line.Trim\\(\\) })",
+      "Bash(./build/ctest.exe)",
+      "Bash(ls build/*.exe)",
+      "Bash(ls *.exe)"
     ]
   }
 }
