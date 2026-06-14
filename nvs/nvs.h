@@ -46,7 +46,8 @@ typedef enum
     NVS_ERR_NO_SPACE,
     NVS_ERR_FLASH,
     NVS_ERR_CRC,
-    NVS_ERR_INVALID_ARG
+    NVS_ERR_INVALID_ARG,
+    NVS_ERR_TOO_MANY_SECTORS
 } nvs_err_t;
 
 /*===========================================================================

@@ -125,10 +125,14 @@ nvs_err_t nvs_mount(const nvs_flash_driver_t *driver)
         driver->read  == NULL ||
         driver->erase_sector == NULL ||
         driver->sector_size == 0 ||
-        driver->sector_count == 0 ||
-        driver->sector_count > NVS_MAX_SECTORS)
+        driver->sector_count == 0)
     {
         return NVS_ERR_INVALID_ARG;
+    }
+
+    if (driver->sector_count > NVS_MAX_SECTORS)
+    {
+        return NVS_ERR_TOO_MANY_SECTORS;
     }
 
     g_nvs.driver = *driver;
@@ -444,6 +448,12 @@ static int read_sector_hdr(uint32_t base,
         return 1;
     }
 
+    /* CRC was computed over the initial write (magic + seq + state=ACTIVE).
+     * set_sector_state() flips the state field in-place via a NOR bit-flip,
+     * so the stored CRC will no longer match after any state transition.
+     * Accepting a non-0xFF state without CRC is intentional: a CRC mismatch
+     * with state still 0xFFFFFFFF is the signature of a torn initial write
+     * and is the only case we reject. */
     if (*state != 0xFFFFFFFFU)
     {
         return 1;
