@@ -15,6 +15,8 @@
 #define NVS_SECTOR_EMPTY        (0xFFFFFFFFU)
 #define NVS_SECTOR_ACTIVE       (0xFFFFFF00U)
 #define NVS_SECTOR_FULL         (0xFFFF0000U)
+/** Source sector being reclaimed by GC. Bit-flip reachable from FULL. */
+#define NVS_SECTOR_FREEING      (0xFF000000U)
 
 /** Entry states (bit-flip progression: 1 -> 0 only) */
 #define NVS_ENTRY_WRITING       (0xFFU)
@@ -81,12 +83,13 @@ typedef struct
  *===========================================================================*/
 
 /**
- * Sector header layout (12 bytes):
+ * Sector header layout (16 bytes):
  *
  *   Offset  Field           Size
  *   0x00    magic           4 B   (0x4E565321)
  *   0x04    seq_num         4 B   (monotonically increasing)
- *   0x08    state           4 B   (Empty / Active / Full)
+ *   0x08    state           4 B   (Empty / Active / Full / Freeing)
+ *   0x0C    crc32           4 B   (CRC32 over bytes 0x00–0x0B)
  */
 
 /**
