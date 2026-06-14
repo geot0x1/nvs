@@ -10,6 +10,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(SOURCES
     main.c
     tests/test_stress.c
+    tests/test_edge_cases.c
 )
 
 # Add subdirectories

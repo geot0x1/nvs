@@ -125,6 +125,8 @@ static nvs_context_t g_nvs;
 
 nvs_err_t nvs_mount(const nvs_flash_driver_t *driver)
 {
+    memset(&g_nvs.driver, 0, sizeof(g_nvs.driver));
+
     if (driver == NULL ||
         driver->write == NULL ||
         driver->read  == NULL ||
@@ -145,23 +147,28 @@ nvs_err_t nvs_mount(const nvs_flash_driver_t *driver)
 
     NVS_LOCK();
 
-    nvs_err_t rc     = NVS_OK;
-    uint32_t best_seq  = 0;
-    int      best_idx  = -1;
+    nvs_err_t rc         = NVS_OK;
+    uint32_t  best_seq   = 0;
+    int       best_idx   = -1;
+    int       best_found = 0;
+    int       seq_found  = 0;
 
     for (uint8_t i = 0; i < SECTOR_COUNT; i++)
     {
         uint32_t magic, seq, state;
         if (read_sector_hdr(sector_addr(i), &magic, &seq, &state))
         {
-            if (state == NVS_SECTOR_ACTIVE && seq >= best_seq)
+            if (state == NVS_SECTOR_ACTIVE
+                && (!best_found || seq_sort_key(seq) >= seq_sort_key(best_seq)))
             {
-                best_seq = seq;
-                best_idx = (int)i;
+                best_seq   = seq;
+                best_idx   = (int)i;
+                best_found = 1;
             }
-            if (seq > g_nvs.seq_counter)
+            if (!seq_found || seq_sort_key(seq) > seq_sort_key(g_nvs.seq_counter))
             {
                 g_nvs.seq_counter = seq;
+                seq_found = 1;
             }
         }
     }
@@ -691,7 +698,7 @@ static void get_sectors_by_seq_desc(uint8_t *out_indices, uint8_t *out_count)
         uint32_t s = seqs[i];
         uint8_t  v = valid[i];
         int j = (int)i - 1;
-        while (j >= 0 && seq_sort_key(seqs[j]) < seq_sort_key(s))
+        while (j >= 0 && seq_sort_key(seqs[j]) <= seq_sort_key(s))
         {
             seqs[j + 1]  = seqs[j];
             valid[j + 1] = valid[j];
