@@ -21,6 +21,8 @@ static int g_bug  = 0;
 static int g_ok   = 0;
 static int g_amb  = 0;
 
+#include "test_stress.c"
+
 /* Inline flash simulator for Issue F (255 sectors) */
 #define FF_SECTOR_SIZE   64U
 #define FF_SECTOR_COUNT  255U
@@ -1530,6 +1532,8 @@ int main(void)
     printf("  Issue summary: %d bug(s) CONFIRMED, %d spec-honored, %d ambiguous\n",
            g_bug, g_ok, g_amb);
     printf("========================================\n");
+
+    run_stress_tests();
 
     return g_fail > 0 ? 1 : 0;
 }
