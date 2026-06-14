@@ -12,7 +12,8 @@
       "Bash(cmake --build build)",
       "Bash(./ctest.exe)",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(cmake --build build --config Debug)"
     ]
   }
 }
