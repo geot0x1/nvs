@@ -394,6 +394,12 @@ nvs_err_t nvs_read(const char *key, void *buf, uint8_t buf_size, uint8_t *out_le
             uint32_t stored_crc;
             read_entry_hdr(base + ctx.match_off, &kl2, &dl2, &stored_crc);
 
+            if (kl2 > NVS_MAX_KEY_LEN || dl2 > NVS_MAX_DATA_LEN)
+            {
+                rc = NVS_ERR_CRC;
+                break;
+            }
+
             uint8_t key_buf[NVS_MAX_KEY_LEN];
             uint8_t data_buf[NVS_MAX_DATA_LEN];
             DRV_READ(base + ctx.match_off + NVS_ENTRY_HDR_SIZE, key_buf, kl2);

@@ -12,6 +12,7 @@ set(SOURCES
     tests/test_stress.c
     tests/test_edge_cases.c
     tests/test_nvs_robustness.c
+    tests/test_vuln_toctou.c
 )
 
 # Add subdirectories
