@@ -172,6 +172,102 @@ static void set_entry_state(uint32_t entry_addr, uint8_t new_state)
  *===========================================================================*/
 
 /**
+ * Compare a key against the key stored at a flash entry address.
+ * Returns 1 if they match, 0 otherwise.
+ */
+static int key_matches_flash(uint32_t entry_addr, const char *key, uint8_t key_len)
+{
+    uint8_t flash_key[NVS_MAX_KEY_LEN];
+    DRV_READ(entry_addr + NVS_ENTRY_HDR_SIZE, flash_key, key_len);
+    return memcmp(flash_key, key, key_len) == 0;
+}
+
+/**
+ * Callback type for walk_sector_entries().
+ *
+ * @param base       Sector base address.
+ * @param off        Byte offset of the current entry within the sector.
+ * @param st         Entry state byte.
+ * @param kl         key_len field from entry header.
+ * @param dl         data_len field from entry header.
+ * @param crc        CRC32 field from entry header.
+ * @param ctx        Caller-supplied context pointer.
+ * @return  0 — continue walking; 1 — stop immediately.
+ */
+typedef int (*entry_visitor_t)(uint32_t base, uint32_t off,
+                               uint8_t st, uint8_t kl, uint8_t dl,
+                               uint32_t crc, void *ctx);
+
+/**
+ * Walk all entries in a sector, invoking visitor() for each one.
+ * Stops when an WRITING entry is hit, sizes are out-of-range, or the
+ * visitor returns 1.
+ */
+static void walk_sector_entries(uint32_t base, entry_visitor_t visitor, void *ctx)
+{
+    uint32_t off = NVS_SECTOR_HDR_SIZE;
+    while (off < SECTOR_SIZE)
+    {
+        uint8_t  kl, dl;
+        uint32_t crc;
+        uint8_t  st = read_entry_hdr(base + off, &kl, &dl, &crc);
+
+        if (st == NVS_ENTRY_WRITING)
+        {
+            break;
+        }
+        if (kl == 0 || kl > NVS_MAX_KEY_LEN || dl > NVS_MAX_DATA_LEN)
+        {
+            break;
+        }
+
+        if (visitor(base, off, st, kl, dl, crc, ctx))
+        {
+            break;
+        }
+
+        off += entry_total_size(kl, dl);
+    }
+}
+
+/**
+ * Write a key-value entry to the active sector: build the on-flash layout,
+ * write it, then commit the state to VALID.
+ * Advances g_nvs.write_offset by the entry's total size.
+ *
+ * @return The flash address at which the entry was written.
+ */
+static uint32_t write_entry_to_active(uint8_t key_len, uint8_t data_len,
+                                      const uint8_t *key, const uint8_t *data)
+{
+    uint32_t esz = entry_total_size(key_len, data_len);
+    uint32_t dest = g_nvs.active_sector_addr + g_nvs.write_offset;
+
+    uint8_t entry[NVS_ENTRY_HDR_SIZE + NVS_MAX_KEY_LEN + NVS_MAX_DATA_LEN + 4];
+    memset(entry, 0xFF, esz);
+
+    entry[0] = NVS_ENTRY_WRITING;
+    entry[1] = key_len;
+    entry[2] = data_len;
+    entry[3] = 0xFF;
+
+    uint32_t crc = compute_entry_crc(key_len, data_len, key, data);
+    entry[4] = (uint8_t)(crc);
+    entry[5] = (uint8_t)(crc >> 8);
+    entry[6] = (uint8_t)(crc >> 16);
+    entry[7] = (uint8_t)(crc >> 24);
+
+    memcpy(&entry[NVS_ENTRY_HDR_SIZE], key, key_len);
+    memcpy(&entry[NVS_ENTRY_HDR_SIZE + key_len], data, data_len);
+
+    DRV_WRITE(dest, entry, (uint16_t)esz);
+    set_entry_state(dest, NVS_ENTRY_VALID);
+
+    g_nvs.write_offset += esz;
+    return dest;
+}
+
+/**
  * Build an ordered list of sector indices sorted by sequence number
  * (descending).  Only sectors with a valid header are included.
  *
@@ -222,95 +318,136 @@ static void get_sectors_by_seq_desc(uint8_t *out_indices, uint8_t *out_count)
 /* Forward declarations */
 static int newer_copy_exists(const char *key, uint8_t key_len, uint32_t src_seq);
 
+typedef struct
+{
+    uint32_t target_seq;
+    int      all_copied;
+} gc_resume_ctx_t;
+
+typedef struct
+{
+    const char *key;
+    uint8_t     key_len;
+    uint32_t    skip_addr; /* pass UINT32_MAX to invalidate all matches */
+    int         found;
+} invalidate_ctx_t;
+
+typedef struct
+{
+    const char *key;
+    uint8_t     key_len;
+    uint32_t    match_off;
+    uint8_t     match_dl;
+    int         found;
+} find_last_ctx_t;
+
+static int invalidate_visitor(uint32_t base, uint32_t off,
+                              uint8_t st, uint8_t kl, uint8_t dl,
+                              uint32_t crc, void *ctx)
+{
+    (void)dl; (void)crc;
+    invalidate_ctx_t *c = (invalidate_ctx_t *)ctx;
+
+    if (st == NVS_ENTRY_VALID && kl == c->key_len
+        && (base + off) != c->skip_addr
+        && key_matches_flash(base + off, c->key, kl))
+    {
+        set_entry_state(base + off, NVS_ENTRY_DELETED);
+        c->found = 1;
+    }
+    return 0;
+}
+
+static int find_last_visitor(uint32_t base, uint32_t off,
+                             uint8_t st, uint8_t kl, uint8_t dl,
+                             uint32_t crc, void *ctx)
+{
+    (void)crc;
+    find_last_ctx_t *c = (find_last_ctx_t *)ctx;
+
+    if (st == NVS_ENTRY_VALID && kl == c->key_len
+        && key_matches_flash(base + off, c->key, kl))
+    {
+        c->match_off = off;
+        c->match_dl  = dl;
+        c->found     = 1;
+    }
+    return 0;
+}
+
+static int gc_resume_visitor(uint32_t base, uint32_t off,
+                             uint8_t st, uint8_t kl, uint8_t dl,
+                             uint32_t crc, void *ctx)
+{
+    (void)crc;
+    gc_resume_ctx_t *c = (gc_resume_ctx_t *)ctx;
+
+    if (st != NVS_ENTRY_VALID)
+    {
+        return 0;
+    }
+
+    uint8_t key_buf[NVS_MAX_KEY_LEN];
+    uint8_t data_buf[NVS_MAX_DATA_LEN];
+    DRV_READ(base + off + NVS_ENTRY_HDR_SIZE, key_buf, kl);
+    DRV_READ(base + off + NVS_ENTRY_HDR_SIZE + kl, data_buf, dl);
+
+    if (newer_copy_exists((const char *)key_buf, kl, c->target_seq))
+    {
+        return 0;
+    }
+
+    if (g_nvs.write_offset + entry_total_size(kl, dl) > SECTOR_SIZE)
+    {
+        c->all_copied = 0;
+        return 1; /* stop — cannot fit, abort GC */
+    }
+
+    write_entry_to_active(kl, dl, key_buf, data_buf);
+    return 0;
+}
+
 /**
  * Resume GC: copy valid entries from target sector to active sector, then erase.
  * Called after a target sector has been selected and a FREEING marker written.
  */
 static nvs_err_t nvs_gc_resume(uint32_t target_base, uint32_t target_seq)
 {
-    uint32_t off = NVS_SECTOR_HDR_SIZE;
     set_sector_state(target_base, NVS_SECTOR_FREEING);
-    int all_copied = 1;
-    while (off < SECTOR_SIZE)
+
+    gc_resume_ctx_t ctx = { .target_seq = target_seq, .all_copied = 1 };
+    walk_sector_entries(target_base, gc_resume_visitor, &ctx);
+
+    if (!ctx.all_copied)
     {
-        uint8_t  kl, dl;
-        uint32_t crc;
-        uint8_t  st = read_entry_hdr(target_base + off, &kl, &dl, &crc);
-
-        if (st == NVS_ENTRY_WRITING)
-        {
-            break;
-        }
-
-        if (st == NVS_ENTRY_VALID)
-        {
-            /* Read key + data from the old sector. */
-            uint8_t key_buf[NVS_MAX_KEY_LEN];
-            uint8_t data_buf[NVS_MAX_DATA_LEN];
-
-            DRV_READ(target_base + off + NVS_ENTRY_HDR_SIZE, key_buf, kl);
-            DRV_READ(target_base + off + NVS_ENTRY_HDR_SIZE + kl, data_buf, dl);
-
-            /* Only copy if no newer version exists. */
-            if (!newer_copy_exists((const char *)key_buf, kl, target_seq))
-            {
-                /* Write directly into the active sector (bypass the
-                   public nvs_write to avoid re-invalidation loops). */
-                uint32_t esz = entry_total_size(kl, dl);
-
-                /* Sector-boundary check for the active sector. */
-                if (g_nvs.write_offset + esz > SECTOR_SIZE)
-                {
-                    /* Cannot fit — this live entry would be lost.
-                       Abort GC to prevent data loss. */
-                    all_copied = 0;
-                    break;
-                }
-
-                /* Build entry on stack. */
-                uint8_t entry[NVS_ENTRY_HDR_SIZE + NVS_MAX_KEY_LEN + NVS_MAX_DATA_LEN + 4];
-                memset(entry, 0xFF, esz);
-
-                entry[0] = NVS_ENTRY_WRITING;
-                entry[1] = kl;
-                entry[2] = dl;
-                entry[3] = 0xFF; /* reserved */
-
-                uint32_t c = compute_entry_crc(kl, dl, key_buf, data_buf);
-                entry[4] = (uint8_t)(c);
-                entry[5] = (uint8_t)(c >> 8);
-                entry[6] = (uint8_t)(c >> 16);
-                entry[7] = (uint8_t)(c >> 24);
-
-                memcpy(&entry[NVS_ENTRY_HDR_SIZE], key_buf, kl);
-                memcpy(&entry[NVS_ENTRY_HDR_SIZE + kl], data_buf, dl);
-
-                /* Flash-write the entry. */
-                DRV_WRITE(g_nvs.active_sector_addr + g_nvs.write_offset,
-                          entry, (uint16_t)esz);
-
-                /* Commit: flip state to Valid. */
-                set_entry_state(g_nvs.active_sector_addr + g_nvs.write_offset,
-                                NVS_ENTRY_VALID);
-
-                g_nvs.write_offset += esz;
-            }
-        }
-
-        off += entry_total_size(kl, dl);
-    }
-
-    if (!all_copied)
-    {
-        /* Could not move all live entries — do NOT erase the source
-           sector, otherwise we would lose data.  Report no space. */
         return NVS_ERR_NO_SPACE;
     }
 
-    /* Erase the old sector — all live data has been safely moved. */
     DRV_ERASE(target_base);
-
     return NVS_OK;
+}
+
+typedef struct
+{
+    const char *key;
+    uint8_t     key_len;
+    int         found;
+} newer_copy_ctx_t;
+
+static int newer_copy_visitor(uint32_t base, uint32_t off,
+                              uint8_t st, uint8_t kl, uint8_t dl,
+                              uint32_t crc, void *ctx)
+{
+    (void)dl; (void)crc;
+    newer_copy_ctx_t *c = (newer_copy_ctx_t *)ctx;
+
+    if (st == NVS_ENTRY_VALID && kl == c->key_len
+        && key_matches_flash(base + off, c->key, kl))
+    {
+        c->found = 1;
+        return 1; /* stop */
+    }
+    return 0;
 }
 
 /**
@@ -319,6 +456,8 @@ static nvs_err_t nvs_gc_resume(uint32_t target_base, uint32_t target_seq)
  */
 static int newer_copy_exists(const char *key, uint8_t key_len, uint32_t src_seq)
 {
+    newer_copy_ctx_t ctx = { .key = key, .key_len = key_len, .found = 0 };
+
     for (uint8_t i = 0; i < SECTOR_COUNT; i++)
     {
         uint32_t base = sector_addr(i);
@@ -333,29 +472,10 @@ static int newer_copy_exists(const char *key, uint8_t key_len, uint32_t src_seq)
             continue;
         }
 
-        /* Walk entries in this higher-seq sector. */
-        uint32_t off = NVS_SECTOR_HDR_SIZE;
-        while (off < SECTOR_SIZE)
+        walk_sector_entries(base, newer_copy_visitor, &ctx);
+        if (ctx.found)
         {
-            uint8_t  kl, dl;
-            uint32_t crc;
-            uint8_t  st = read_entry_hdr(base + off, &kl, &dl, &crc);
-
-            if (st == NVS_ENTRY_WRITING)
-            {
-                break; /* end of written area */
-            }
-
-            if (st == NVS_ENTRY_VALID && kl == key_len)
-            {
-                uint8_t flash_key[NVS_MAX_KEY_LEN];
-                DRV_READ(base + off + NVS_ENTRY_HDR_SIZE, flash_key, kl);
-                if (memcmp(flash_key, key, kl) == 0)
-                {
-                    return 1; /* newer copy found */
-                }
-            }
-            off += entry_total_size(kl, dl);
+            return 1;
         }
     }
     return 0;
@@ -613,38 +733,14 @@ nvs_err_t nvs_write(const char *key, const void *data, uint8_t len)
         }
     }
 
-    /* ---- Build the entry on the stack ---- */
-    uint8_t entry[NVS_ENTRY_HDR_SIZE + NVS_MAX_KEY_LEN + NVS_MAX_DATA_LEN + 4];
-    memset(entry, 0xFF, esz);
-
-    entry[0] = NVS_ENTRY_WRITING;   /* state — not yet committed  */
-    entry[1] = key_len;
-    entry[2] = len;
-    entry[3] = 0xFF;                 /* reserved                    */
-
-    uint32_t crc = compute_entry_crc(key_len, len,
-                                     (const uint8_t *)key,
-                                     (const uint8_t *)data);
-    entry[4] = (uint8_t)(crc);
-    entry[5] = (uint8_t)(crc >> 8);
-    entry[6] = (uint8_t)(crc >> 16);
-    entry[7] = (uint8_t)(crc >> 24);
-
-    memcpy(&entry[NVS_ENTRY_HDR_SIZE], key, key_len);
-    memcpy(&entry[NVS_ENTRY_HDR_SIZE + key_len], data, len);
-
-    /* ---- Write the entry (state is still 0xFF = Writing) ---- */
-    DRV_WRITE(g_nvs.active_sector_addr + g_nvs.write_offset,
-              entry, (uint16_t)esz);
-
-    /* ---- Commit: flip state to Valid ---- */
-    set_entry_state(g_nvs.active_sector_addr + g_nvs.write_offset,
-                    NVS_ENTRY_VALID);
-
-    uint32_t new_entry_addr = g_nvs.active_sector_addr + g_nvs.write_offset;
-    g_nvs.write_offset += esz;
+    /* ---- Write the entry and commit ---- */
+    uint32_t new_entry_addr = write_entry_to_active(key_len, len,
+                                                    (const uint8_t *)key,
+                                                    (const uint8_t *)data);
 
     /* ---- Invalidate older versions of this key ---- */
+    invalidate_ctx_t inv_ctx = { .key = key, .key_len = key_len, .skip_addr = new_entry_addr, .found = 0 };
+
     for (uint8_t i = 0; i < SECTOR_COUNT; i++)
     {
         uint32_t base = sector_addr(i);
@@ -655,37 +751,7 @@ nvs_err_t nvs_write(const char *key, const void *data, uint8_t len)
             continue;
         }
 
-        uint32_t off = NVS_SECTOR_HDR_SIZE;
-        while (off < SECTOR_SIZE)
-        {
-            uint8_t  kl, dl;
-            uint32_t entry_crc;
-            uint8_t  st = read_entry_hdr(base + off, &kl, &dl, &entry_crc);
-
-            if (st == NVS_ENTRY_WRITING)
-            {
-                break;
-            }
-
-            /* Validate entry sizes. */
-            if (kl == 0 || kl > NVS_MAX_KEY_LEN || dl > NVS_MAX_DATA_LEN)
-            {
-                break;
-            }
-
-            /* Invalidate older copies of the key if this is a VALID entry. */
-            if (st == NVS_ENTRY_VALID && (base + off) != new_entry_addr && kl == key_len)
-            {
-                uint8_t flash_key[NVS_MAX_KEY_LEN];
-                DRV_READ(base + off + NVS_ENTRY_HDR_SIZE, flash_key, kl);
-                if (memcmp(flash_key, key, kl) == 0)
-                {
-                    set_entry_state(base + off, NVS_ENTRY_DELETED);
-                }
-            }
-
-            off += entry_total_size(kl, dl);
-        }
+        walk_sector_entries(base, invalidate_visitor, &inv_ctx);
     }
 
     return NVS_OK;
@@ -716,49 +782,17 @@ nvs_err_t nvs_read(const char *key, void *buf, uint8_t buf_size, uint8_t *out_le
     for (uint8_t s = 0; s < count; s++)
     {
         uint32_t base = sector_addr(indices[s]);
-        uint32_t off  = NVS_SECTOR_HDR_SIZE;
 
-        /*
-         * Walk forward through the sector.  Because the append-only log
-         * writes newer entries at higher offsets, we keep track of the
-         * *last* valid match — that is the most recent in this sector.
-         */
-        uint32_t match_off  = 0;
-        uint8_t  match_dl   = 0;
-        int      found_here = 0;
+        find_last_ctx_t ctx = { .key = key, .key_len = key_len,
+                                .match_off = 0, .match_dl = 0, .found = 0 };
+        walk_sector_entries(base, find_last_visitor, &ctx);
 
-        while (off < SECTOR_SIZE)
-        {
-            uint8_t  kl, dl;
-            uint32_t entry_crc;
-            uint8_t  st = read_entry_hdr(base + off, &kl, &dl, &entry_crc);
-
-            if (st == NVS_ENTRY_WRITING)
-            {
-                break;
-            }
-
-            if (st == NVS_ENTRY_VALID && kl == key_len)
-            {
-                uint8_t flash_key[NVS_MAX_KEY_LEN];
-                DRV_READ(base + off + NVS_ENTRY_HDR_SIZE, flash_key, kl);
-                if (memcmp(flash_key, key, kl) == 0)
-                {
-                    match_off  = off;
-                    match_dl   = dl;
-                    found_here = 1;
-                }
-            }
-
-            off += entry_total_size(kl, dl);
-        }
-
-        if (found_here)
+        if (ctx.found)
         {
             /* Verify CRC before returning. */
             uint8_t  kl2, dl2;
             uint32_t stored_crc;
-            read_entry_hdr(base + match_off, &kl2, &dl2, &stored_crc);
+            read_entry_hdr(base + ctx.match_off, &kl2, &dl2, &stored_crc);
 
             if (kl2 > NVS_MAX_KEY_LEN || dl2 > NVS_MAX_DATA_LEN)
             {
@@ -767,8 +801,8 @@ nvs_err_t nvs_read(const char *key, void *buf, uint8_t buf_size, uint8_t *out_le
 
             uint8_t key_buf[NVS_MAX_KEY_LEN];
             uint8_t data_buf[NVS_MAX_DATA_LEN];
-            DRV_READ(base + match_off + NVS_ENTRY_HDR_SIZE, key_buf, kl2);
-            DRV_READ(base + match_off + NVS_ENTRY_HDR_SIZE + kl2, data_buf, dl2);
+            DRV_READ(base + ctx.match_off + NVS_ENTRY_HDR_SIZE, key_buf, kl2);
+            DRV_READ(base + ctx.match_off + NVS_ENTRY_HDR_SIZE + kl2, data_buf, dl2);
 
             uint32_t calc_crc = compute_entry_crc(kl2, dl2, key_buf, data_buf);
             if (calc_crc != stored_crc)
@@ -776,13 +810,13 @@ nvs_err_t nvs_read(const char *key, void *buf, uint8_t buf_size, uint8_t *out_le
                 return NVS_ERR_CRC;
             }
 
-            if (match_dl > buf_size)
+            if (ctx.match_dl > buf_size)
             {
                 return NVS_ERR_INVALID_ARG;
             }
 
-            memcpy(buf, data_buf, match_dl);
-            *out_len = match_dl;
+            memcpy(buf, data_buf, ctx.match_dl);
+            *out_len = ctx.match_dl;
             return NVS_OK;
         }
     }
@@ -807,7 +841,8 @@ nvs_err_t nvs_delete(const char *key)
         return NVS_ERR_INVALID_ARG;
     }
 
-    int found = 0;
+    invalidate_ctx_t ctx = { .key = key, .key_len = key_len,
+                             .skip_addr = 0xFFFFFFFFU, .found = 0 };
 
     for (uint8_t i = 0; i < SECTOR_COUNT; i++)
     {
@@ -819,32 +854,8 @@ nvs_err_t nvs_delete(const char *key)
             continue;
         }
 
-        uint32_t off = NVS_SECTOR_HDR_SIZE;
-        while (off < SECTOR_SIZE)
-        {
-            uint8_t  kl, dl;
-            uint32_t crc;
-            uint8_t  st = read_entry_hdr(base + off, &kl, &dl, &crc);
-
-            if (st == NVS_ENTRY_WRITING)
-            {
-                break;
-            }
-
-            if (st == NVS_ENTRY_VALID && kl == key_len)
-            {
-                uint8_t flash_key[NVS_MAX_KEY_LEN];
-                DRV_READ(base + off + NVS_ENTRY_HDR_SIZE, flash_key, kl);
-                if (memcmp(flash_key, key, kl) == 0)
-                {
-                    set_entry_state(base + off, NVS_ENTRY_DELETED);
-                    found = 1;
-                }
-            }
-
-            off += entry_total_size(kl, dl);
-        }
+        walk_sector_entries(base, invalidate_visitor, &ctx);
     }
 
-    return found ? NVS_OK : NVS_ERR_NOT_FOUND;
+    return ctx.found ? NVS_OK : NVS_ERR_NOT_FOUND;
 }
