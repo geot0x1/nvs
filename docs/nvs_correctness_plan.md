@@ -35,27 +35,6 @@ Results from the latest test run used to drive this plan:
 
 ---
 
-### Step 9 — Extract `nvs_gc_resume()` helper from `nvs_gc()`
-
-**Fixes:** Structural pre-condition for Steps 11–14
-
-**Description:** The entry-copy loop inside `nvs_gc()` must be callable from two places:
-`nvs_gc()` itself (normal path) and `nvs_mount()` (interrupted-GC recovery, Step 13).
-Extracting it now keeps both call sites DRY.
-
-**File:** `nvs/nvs.c`
-
-**Action:** Move the entry-copy-and-erase body from `nvs_gc()` into:
-```c
-static nvs_err_t nvs_gc_resume(uint32_t target_base, uint32_t target_seq);
-```
-Have `nvs_gc()` call `nvs_gc_resume()` after selecting the target sector. All entry-copy,
-size-check, and erase logic moves into the helper.
-
-**Test:** All existing passing tests continue to pass unchanged (pure refactor).
-
----
-
 ### Step 10 — Add `NVS_SECTOR_FREEING` state constant and transition to it before GC copy
 
 **Fixes:** Power-loss safety during GC
@@ -249,7 +228,6 @@ all-pass result.
 
 | Step | Fixes | File | Test |
 |------|-------|------|------|
-| 9  | Pre-condition: `nvs_gc_resume()` helper extracted | `nvs.c` | All existing tests still pass |
 | 10 | Add `NVS_SECTOR_FREEING` and commit before GC copy | `nvs.h` + `nvs.c` | Manual interrupted-GC test passes |
 | 11 | Pre-condition: `activate_empty_sector_only()` helper | `nvs.c` | All existing tests still pass |
 | 12 | Issue D: GC sector-rotation instead of abort | `nvs.c` | `test_issue_D_gc_cannot_relocate` → `[PASS]` |

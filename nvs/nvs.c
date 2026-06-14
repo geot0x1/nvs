@@ -219,94 +219,15 @@ static void get_sectors_by_seq_desc(uint8_t *out_indices, uint8_t *out_count)
  *  Internal — garbage collection (called automatically, not part of API)
  *===========================================================================*/
 
-/**
- * Check if a newer valid copy of a key exists in any sector with a
- * sequence number higher than `src_seq`.
- */
-static int newer_copy_exists(const char *key, uint8_t key_len, uint32_t src_seq)
-{
-    for (uint8_t i = 0; i < SECTOR_COUNT; i++)
-    {
-        uint32_t base = sector_addr(i);
-        uint32_t magic, seq, state;
-
-        if (!read_sector_hdr(base, &magic, &seq, &state))
-        {
-            continue;
-        }
-        if (seq <= src_seq)
-        {
-            continue;
-        }
-
-        /* Walk entries in this higher-seq sector. */
-        uint32_t off = NVS_SECTOR_HDR_SIZE;
-        while (off < SECTOR_SIZE)
-        {
-            uint8_t  kl, dl;
-            uint32_t crc;
-            uint8_t  st = read_entry_hdr(base + off, &kl, &dl, &crc);
-
-            if (st == NVS_ENTRY_WRITING)
-            {
-                break; /* end of written area */
-            }
-
-            if (st == NVS_ENTRY_VALID && kl == key_len)
-            {
-                uint8_t flash_key[NVS_MAX_KEY_LEN];
-                DRV_READ(base + off + NVS_ENTRY_HDR_SIZE, flash_key, kl);
-                if (memcmp(flash_key, key, kl) == 0)
-                {
-                    return 1; /* newer copy found */
-                }
-            }
-            off += entry_total_size(kl, dl);
-        }
-    }
-    return 0;
-}
+/* Forward declarations */
+static int newer_copy_exists(const char *key, uint8_t key_len, uint32_t src_seq);
 
 /**
- * Internal garbage collection.
- *
- * Finds the Full sector with the lowest sequence number, copies any
- * still-valid entries to the active sector, then erases the old sector.
- *
- * @return NVS_OK if a sector was reclaimed, NVS_ERR_NO_SPACE otherwise.
+ * Resume GC: copy valid entries from target sector to active sector, then erase.
+ * Called after a target sector has been selected and a FREEING marker written.
  */
-static nvs_err_t nvs_gc(void)
+static nvs_err_t nvs_gc_resume(uint32_t target_base, uint32_t target_seq)
 {
-    /* Find the Full sector with the lowest sequence number. */
-    uint32_t lowest_seq  = 0xFFFFFFFF;
-    int      target_idx  = -1;
-
-    for (uint8_t i = 0; i < SECTOR_COUNT; i++)
-    {
-        uint32_t base = sector_addr(i);
-        uint32_t magic, seq, state;
-
-        if (!read_sector_hdr(base, &magic, &seq, &state))
-        {
-            continue;
-        }
-        if (state == NVS_SECTOR_FULL && seq < lowest_seq)
-        {
-            lowest_seq = seq;
-            target_idx = (int)i;
-        }
-    }
-
-    if (target_idx < 0)
-    {
-        return NVS_ERR_NO_SPACE; /* nothing to collect */
-    }
-
-    uint32_t target_base = sector_addr((uint8_t)target_idx);
-    uint32_t target_seq  = lowest_seq;
-
-    /* Walk entries in the target sector, copy valid ones that have
-       no newer version elsewhere. */
     uint32_t off = NVS_SECTOR_HDR_SIZE;
     int all_copied = 1;
     while (off < SECTOR_SIZE)
@@ -389,6 +310,95 @@ static nvs_err_t nvs_gc(void)
     DRV_ERASE(target_base);
 
     return NVS_OK;
+}
+
+/**
+ * Check if a newer valid copy of a key exists in any sector with a
+ * sequence number higher than `src_seq`.
+ */
+static int newer_copy_exists(const char *key, uint8_t key_len, uint32_t src_seq)
+{
+    for (uint8_t i = 0; i < SECTOR_COUNT; i++)
+    {
+        uint32_t base = sector_addr(i);
+        uint32_t magic, seq, state;
+
+        if (!read_sector_hdr(base, &magic, &seq, &state))
+        {
+            continue;
+        }
+        if (seq <= src_seq)
+        {
+            continue;
+        }
+
+        /* Walk entries in this higher-seq sector. */
+        uint32_t off = NVS_SECTOR_HDR_SIZE;
+        while (off < SECTOR_SIZE)
+        {
+            uint8_t  kl, dl;
+            uint32_t crc;
+            uint8_t  st = read_entry_hdr(base + off, &kl, &dl, &crc);
+
+            if (st == NVS_ENTRY_WRITING)
+            {
+                break; /* end of written area */
+            }
+
+            if (st == NVS_ENTRY_VALID && kl == key_len)
+            {
+                uint8_t flash_key[NVS_MAX_KEY_LEN];
+                DRV_READ(base + off + NVS_ENTRY_HDR_SIZE, flash_key, kl);
+                if (memcmp(flash_key, key, kl) == 0)
+                {
+                    return 1; /* newer copy found */
+                }
+            }
+            off += entry_total_size(kl, dl);
+        }
+    }
+    return 0;
+}
+
+/**
+ * Internal garbage collection.
+ *
+ * Finds the Full sector with the lowest sequence number and calls nvs_gc_resume()
+ * to copy valid entries and erase the old sector.
+ *
+ * @return NVS_OK if a sector was reclaimed, NVS_ERR_NO_SPACE otherwise.
+ */
+static nvs_err_t nvs_gc(void)
+{
+    /* Find the Full sector with the lowest sequence number. */
+    uint32_t lowest_seq  = 0xFFFFFFFF;
+    int      target_idx  = -1;
+
+    for (uint8_t i = 0; i < SECTOR_COUNT; i++)
+    {
+        uint32_t base = sector_addr(i);
+        uint32_t magic, seq, state;
+
+        if (!read_sector_hdr(base, &magic, &seq, &state))
+        {
+            continue;
+        }
+        if (state == NVS_SECTOR_FULL && seq < lowest_seq)
+        {
+            lowest_seq = seq;
+            target_idx = (int)i;
+        }
+    }
+
+    if (target_idx < 0)
+    {
+        return NVS_ERR_NO_SPACE; /* nothing to collect */
+    }
+
+    uint32_t target_base = sector_addr((uint8_t)target_idx);
+    uint32_t target_seq  = lowest_seq;
+
+    return nvs_gc_resume(target_base, target_seq);
 }
 
 /*===========================================================================
