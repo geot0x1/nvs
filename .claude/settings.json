@@ -7,7 +7,8 @@
       "Bash(cmake --build . --target ctest)",
       "Bash(make clean *)",
       "Bash(make)",
-      "Read(//c/Users/George/.claude/projects/c--Users-George-Desktop-workspace-development-nvs/**)"
+      "Read(//c/Users/George/.claude/projects/c--Users-George-Desktop-workspace-development-nvs/**)",
+      "PowerShell(cmake --version)"
     ]
   }
 }
